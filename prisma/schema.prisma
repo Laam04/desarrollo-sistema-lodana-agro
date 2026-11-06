@@ -1,0 +1,81 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Crop {
+  id              String     @id @default(cuid())
+  name            String
+  hasVarieties    Boolean    @default(false)
+  hasLots         Boolean    @default(false)
+  tracksSurface   Boolean    @default(false)
+  hasOtherDetails Boolean    @default(false)
+  unitId          String?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  unit            Unit?      @relation(fields: [unitId], references: [id])
+  varieties       Variety[]
+  lots            Lot[]
+  zones           Zone[]
+  shipments       Shipment[]
+  @@index([name])
+  @@index([unitId])
+}
+
+model Variety {
+  id        String   @id @default(cuid())
+  cropId    String
+  name      String
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  crop      Crop     @relation(fields: [cropId], references: [id])
+  @@index([cropId, active])
+}
+
+model Lot {
+  id           String   @id @default(cuid())
+  cropId       String
+  name         String
+  surface      Decimal? @db.Decimal(12, 2)
+  surfaceUnit  String?
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  crop         Crop     @relation(fields: [cropId], references: [id])
+  @@index([cropId, active])
+}
+
+model Zone {
+  id        String   @id @default(cuid())
+  cropId    String
+  name      String
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  crop      Crop     @relation(fields: [cropId], references: [id])
+  @@index([cropId, active])
+}
+
+model Unit {
+  id        String     @id @default(cuid())
+  name      String     @unique
+  active    Boolean    @default(true)
+  createdAt DateTime   @default(now())
+  crops     Crop[]
+  shipments Shipment[]
+  @@index([active])
+}
+
+model Shipment {
+  id        String   @id @default(cuid())
+  cropId    String
+  unitId    String
+  quantity  Decimal  @db.Decimal(12, 2)
+  unitPrice Decimal  @db.Decimal(12, 2)
+  createdAt DateTime @default(now())
+  crop      Crop     @relation(fields: [cropId], references: [id])
+  unit      Unit     @relation(fields: [unitId], references: [id])
+  @@index([cropId, createdAt])
+}

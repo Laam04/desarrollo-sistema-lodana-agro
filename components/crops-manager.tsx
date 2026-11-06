@@ -1,0 +1,47 @@
+'use client'
+
+import useSWR from 'swr'
+import { useState } from 'react'
+import { CircleHelp, Loader2, Plus, Sprout, X } from 'lucide-react'
+
+type Unit = { id: string; name: string }
+type Crop = { id: string; name: string; hasVarieties: boolean; hasLots: boolean; unit?: Unit | null; varieties: { id: string; name: string }[]; zones: { id: string; name: string }[]; lots: { id: string; name: string; surface: string | number | null }[] }
+const fetcher = (url: string) => fetch(url).then((response) => response.json())
+
+function YesNo({ value, onChange }: { value: boolean; onChange: (value: boolean) => void }) {
+  return <div className="flex gap-2" role="group" aria-label="Seleccionar sí o no"><button type="button" onClick={() => onChange(true)} className={`rounded-lg border px-3 py-1.5 text-xs font-semibold ${value ? 'border-[#6d9c7a] bg-[#e4f0e7] text-[#24523b]' : 'border-border text-muted-foreground'}`}>Sí</button><button type="button" onClick={() => onChange(false)} className={`rounded-lg border px-3 py-1.5 text-xs font-semibold ${!value ? 'border-[#6d9c7a] bg-[#e4f0e7] text-[#24523b]' : 'border-border text-muted-foreground'}`}>No</button></div>
+}
+
+function TagInput({ label, values, onChange, placeholder }: { label: string; values: string[]; onChange: (values: string[]) => void; placeholder: string }) {
+  const [draft, setDraft] = useState('')
+  function add() { const clean = draft.trim(); if (clean && !values.includes(clean)) onChange([...values, clean]); setDraft('') }
+  return <div className="grid gap-2"><span className="text-sm font-medium">{label}</span><div className="flex flex-wrap gap-2">{values.map((value) => <span key={value} className="inline-flex items-center gap-1 rounded-full bg-[#e4f0e7] px-2.5 py-1 text-xs text-[#24523b]">{value}<button type="button" aria-label={`Quitar ${value}`} onClick={() => onChange(values.filter((item) => item !== value))}><X className="size-3" /></button></span>)}</div><div className="flex gap-2"><input value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); add() } }} placeholder={placeholder} className="min-w-0 flex-1 rounded-xl border border-border bg-background px-3 py-2 text-sm" /><button type="button" onClick={add} className="rounded-xl border border-border px-3 text-sm font-medium hover:bg-muted"><Plus className="mr-1 inline size-4" />Agregar</button></div></div>
+}
+
+export function CropsManager() {
+  const { data: crops = [], mutate: refreshCrops } = useSWR<Crop[]>('/api/crops', fetcher)
+  const { data: units = [], mutate: refreshUnits } = useSWR<Unit[]>('/api/units', fetcher)
+  const [name, setName] = useState('')
+  const [hasLots, setHasLots] = useState(false)
+  const [hasVarieties, setHasVarieties] = useState(false)
+  const [varieties, setVarieties] = useState<string[]>([])
+  const [zones, setZones] = useState<string[]>([])
+  const [unitId, setUnitId] = useState('')
+  const [newUnit, setNewUnit] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [message, setMessage] = useState('')
+  async function addUnit() { const clean = newUnit.trim(); if (!clean) return; const response = await fetch('/api/units', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: clean }) }); const unit = await response.json(); if (response.ok) { await refreshUnits(); setUnitId(unit.id); setNewUnit('') } else setMessage(unit.error) }
+  async function createCrop(event: React.FormEvent) { event.preventDefault(); setLoading(true); setMessage(''); const response = await fetch('/api/crops', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, hasLots, hasVarieties, varieties: hasVarieties ? varieties : [], zones: hasLots ? zones : [], unitId: unitId || null }) }); const data = await response.json(); if (!response.ok) setMessage(data.error ?? 'No se pudo guardar el cultivo.'); else { setName(''); setHasLots(false); setHasVarieties(false); setVarieties([]); setZones([]); setUnitId(''); setMessage('Cultivo guardado correctamente.'); await refreshCrops() } setLoading(false) }
+
+  return <div className="mt-8 grid gap-5 xl:grid-cols-[1.1fr_0.9fr]">
+    <section className="rounded-2xl border border-[#e1e9e1] bg-white/80 p-5 dark:border-[#2d3b32] dark:bg-[#18211c]"><div className="flex items-start justify-between gap-4"><div><p className="text-xs font-semibold uppercase tracking-[0.15em] text-[#2c6048]">Configuración</p><h3 className="mt-1 text-xl font-semibold">Nuevo cultivo</h3><p className="mt-1 text-sm text-muted-foreground">Las preguntas Sí/No muestran solamente la información que aplica.</p></div><div className="flex size-10 items-center justify-center rounded-xl bg-[#e4f0e7] text-[#2c6048]"><Sprout /></div></div>
+      <form onSubmit={createCrop} className="mt-6 grid gap-5"><label className="grid gap-1.5 text-sm font-medium">Nombre del cultivo<input required value={name} onChange={(event) => setName(event.target.value)} placeholder="Ej. Tomate" className="rounded-xl border border-border bg-background px-3 py-2.5 text-sm font-normal outline-none focus:ring-2 focus:ring-[#b8d8bf]" /></label>
+        <div className="grid gap-2"><span className="text-sm font-medium">¿Se organiza por lotes o zonas?</span><YesNo value={hasLots} onChange={setHasLots} /></div>{hasLots && <TagInput label="Zonas asociadas (opcional)" values={zones} onChange={setZones} placeholder="Ej. Invernadero 1" />}
+        <div className="grid gap-2"><span className="text-sm font-medium">¿Tiene variedades?</span><YesNo value={hasVarieties} onChange={setHasVarieties} /></div>{hasVarieties && <TagInput label="Variedades (opcional)" values={varieties} onChange={setVarieties} placeholder="Ej. Cherry" />}
+        <div className="grid gap-2"><label className="text-sm font-medium" htmlFor="unit">Unidad para registrar cosechas</label><div className="flex gap-2"><select id="unit" value={unitId} onChange={(event) => setUnitId(event.target.value)} className="min-w-0 flex-1 rounded-xl border border-border bg-background px-3 py-2.5 text-sm"><option value="">Seleccionar unidad</option>{units.map((unit) => <option key={unit.id} value={unit.id}>{unit.name}</option>)}</select><input value={newUnit} onChange={(event) => setNewUnit(event.target.value)} placeholder="Nueva unidad" className="w-36 rounded-xl border border-border bg-background px-3 py-2.5 text-sm" /><button type="button" onClick={addUnit} className="rounded-xl border border-border px-3 text-sm font-medium hover:bg-muted" aria-label="Agregar unidad"><Plus /></button></div><span className="text-xs text-muted-foreground">Las unidades son reutilizables y no se eliminan para proteger el historial.</span></div>
+        {message && <p className="rounded-xl bg-[#eef5ef] px-3 py-2 text-sm text-[#24523b]">{message}</p>}<button disabled={loading} className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#2c6048] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#234d39] disabled:opacity-60">{loading ? <Loader2 className="animate-spin" /> : <Plus />}Guardar cultivo</button>
+      </form>
+    </section>
+    <section className="rounded-2xl border border-[#e1e9e1] bg-white/80 p-5 dark:border-[#2d3b32] dark:bg-[#18211c]"><p className="text-xs font-semibold uppercase tracking-[0.15em] text-[#2c6048]">Catálogo</p><h3 className="mt-1 text-xl font-semibold">Cultivos registrados</h3>{crops.length === 0 ? <div className="mt-6 flex min-h-44 flex-col items-center justify-center rounded-xl border border-dashed border-border px-5 text-center"><CircleHelp className="mb-2 text-muted-foreground" /><p className="text-sm font-medium">Aún no hay cultivos</p><p className="mt-1 text-xs text-muted-foreground">El primer cultivo que guardes aparecerá aquí.</p></div> : <div className="mt-5 grid gap-2">{crops.map((crop) => <div key={crop.id} className="rounded-xl border border-border/70 p-3"><div className="flex items-center justify-between"><span className="font-medium">{crop.name}</span>{crop.unit && <span className="rounded-full bg-[#e4f0e7] px-2 py-1 text-[11px] text-[#24523b]">{crop.unit.name}</span>}</div><div className="mt-2 flex flex-wrap gap-1.5 text-xs text-muted-foreground">{crop.hasLots && <span>Lotes: {crop.zones.map((zone) => zone.name).join(', ') || 'sin zonas registradas'}</span>}{crop.hasVarieties && <span>Variedades: {crop.varieties.map((variety) => variety.name).join(', ') || 'sin variedades registradas'}</span>}</div></div>)}</div>}</section>
+  </div>
+}
