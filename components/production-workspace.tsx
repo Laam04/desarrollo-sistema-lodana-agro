@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { useState } from 'react'
 import { ArrowLeft, BarChart3, Boxes, CalendarDays, ChevronRight, CircleHelp, ClipboardList, DollarSign, Leaf, Menu, Plus, Search, Sprout, Truck, Wheat, X } from 'lucide-react'
 import { CropsManager } from '@/components/crops-manager'
+import { ProductionRecords, ProductionSummary } from '@/components/production-records'
 
 const sections = [
   { id: 'resumen', label: 'Resumen', icon: BarChart3 },
@@ -52,9 +53,9 @@ export function ProductionWorkspace() {
   )
 }
 
-function Summary() { return <section className="mt-8"><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{[['Producción registrada', '0 kg', Wheat], ['Mermas registradas', '0 kg', Leaf], ['Costos registrados', '$0.00', DollarSign], ['Envíos registrados', '0', Truck]].map(([label, value, Icon]) => <div key={label as string} className="rounded-2xl border border-[#e1e9e1] bg-white/80 p-5 dark:border-[#2d3b32] dark:bg-[#18211c]"><div className="flex justify-between"><p className="text-xs font-medium text-muted-foreground">{label as string}</p><Icon className="size-4 text-[#588467]" /></div><p className="mt-5 text-2xl font-semibold">{value as string}</p><p className="mt-1 text-xs text-muted-foreground">Sin registros todavía</p></div>)}</div><div className="mt-5 grid gap-5 lg:grid-cols-2"><EmptyPanel title="Aún no hay cosechas registradas" description="Registra una cosecha para comenzar a visualizar la producción por periodo." icon={BarChart3} /><EmptyPanel title="Sin actividad de producción" description="Los movimientos de este perfil aparecerán aquí cuando se registren." icon={ClipboardList} /></div></section> }
+function Summary() { return <ProductionSummary /> }
 
-function RecordsSection({ active }: { active: string }) { const copy = sectionCopy[active]; if (active === 'cultivos') return <CropsManager />; return <section className="mt-8 rounded-2xl border border-[#e1e9e1] bg-white/80 p-5 dark:border-[#2d3b32] dark:bg-[#18211c]"><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div className="relative max-w-sm"><Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><input aria-label="Buscar registros" placeholder="Buscar registros" className="w-full rounded-xl border border-border bg-background py-2.5 pl-9 pr-3 text-sm outline-none focus:ring-2 focus:ring-[#b8d8bf]" /></div><button className="inline-flex items-center gap-2 rounded-xl border border-border px-3 py-2 text-sm text-muted-foreground hover:bg-muted"><CalendarDays />Filtrar por fecha</button></div><div className="mt-8"><EmptyPanel title={`No hay ${copy.title.toLowerCase()} registrados`} description="Todavía no existen datos para mostrar. Usa el botón de registro para agregar información real." icon={ClipboardList} /></div></section> }
+function RecordsSection({ active }: { active: string }) { if (active === 'cultivos') return <CropsManager />; return <ProductionRecords active={active} /> }
 
 function EmptyPanel({ title, description, icon: Icon }: { title: string; description: string; icon: typeof BarChart3 }) { return <div className="flex min-h-56 flex-col items-center justify-center rounded-2xl border border-dashed border-border/80 bg-muted/20 px-5 text-center"><div className="mb-3 flex size-11 items-center justify-center rounded-xl bg-background text-muted-foreground shadow-sm ring-1 ring-border/60"><Icon /></div><p className="text-sm font-medium">{title}</p><p className="mt-1 max-w-md text-xs leading-5 text-muted-foreground">{description}</p></div> }
 
