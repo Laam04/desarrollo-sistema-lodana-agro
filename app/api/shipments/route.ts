@@ -18,6 +18,6 @@ export async function POST(request: Request) {
   if ('error' in refs) return NextResponse.json({ error: refs.error }, { status: 400 })
   const unit = await validateUnit(body.unitId || refs.crop.unitId)
   if (!unit) return NextResponse.json({ error: 'Selecciona una unidad activa.' }, { status: 400 })
-  const row = await prisma.shipment.create({ data: { date, cropId, varietyId: refs.varietyId, lotId: refs.lotId, quantity, marketQuantity, unitId: unit.id, unitPrice, totalAmount: quantity * unitPrice, notes: cleanName(body.notes) || null }, include: { crop: true, variety: true, lot: true, unit: true } })
+  const row = await prisma.shipment.create({ data: { date, cropId, varietyId: refs.varietyId, lotId: refs.lotId, quantity, marketQuantity, unitId: unit.id, unitPrice, totalAmount: quantity * unitPrice, recipient: cleanName(body.recipient) || null, notes: cleanName(body.notes) || null }, include: { crop: true, variety: true, lot: true, unit: true } })
   return NextResponse.json(row, { status: 201 })
 }

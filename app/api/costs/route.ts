@@ -3,7 +3,7 @@ import { prisma } from '@/lib/prisma'
 import { cleanName, parseDate, parsePositiveDecimal } from '@/lib/production-validation'
 
 export async function GET() {
-  return NextResponse.json(await prisma.cost.findMany({ include: { category: true, subcategory: true, allocations: { include: { crop: true } } }, orderBy: { date: 'desc' }, take: 100 }))
+  return NextResponse.json(await prisma.cost.findMany({ where: { active: true }, include: { category: true, subcategory: true, allocations: { include: { crop: true } } }, orderBy: { date: 'desc' }, take: 100 }))
 }
 
 export async function POST(request: Request) {
