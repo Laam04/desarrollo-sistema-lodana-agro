@@ -1,28 +1,120 @@
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
-import { cleanName, parseDate, parsePositiveDecimal, validateCropReferences, validateUnit } from '@/lib/production-validation'
+import {
+  cleanName,
+  normalizeName,
+  parseDate,
+  parsePositiveDecimal,
+} from '@/lib/production-validation'
 
-async function getReason(name: string) {
-  const normalizedName = name.toLocaleLowerCase('es-EC')
-  return prisma.lossReason.upsert({ where: { normalizedName }, update: { active: true }, create: { name, normalizedName } })
+const lossInclude = {
+  harvest: {
+    include: {
+      crop: true,
+      variety: true,
+      productionArea: true,
+      unit: true,
+    },
+  },
+  reason: true,
 }
 
 export async function GET() {
-  return NextResponse.json(await prisma.loss.findMany({ where: { status: 'ACTIVE' }, include: { crop: true, variety: true, lot: true, unit: true, reason: true }, orderBy: { date: 'desc' }, take: 100 }))
+  const rows = await prisma.loss.findMany({
+    where: { status: 'ACTIVE' },
+    include: lossInclude,
+    orderBy: { date: 'desc' },
+    take: 100,
+  })
+
+  return NextResponse.json(rows)
 }
 
 export async function POST(request: Request) {
-  const body = await request.json() as Record<string, unknown>
-  const date = parseDate(body.date)
-  const cropId = typeof body.cropId === 'string' ? body.cropId : ''
-  const quantity = parsePositiveDecimal(body.quantity)
-  const reasonName = cleanName(body.reason)
-  if (!date || !cropId || !quantity || !reasonName) return NextResponse.json({ error: 'Completa fecha, cultivo, cantidad positiva y motivo.' }, { status: 400 })
-  const refs = await validateCropReferences(body, cropId)
-  if ('error' in refs) return NextResponse.json({ error: refs.error }, { status: 400 })
-  const unit = await validateUnit(body.unitId || refs.crop.unitId)
-  if (!unit) return NextResponse.json({ error: 'Selecciona una unidad activa.' }, { status: 400 })
-  const reason = await getReason(reasonName)
-  const row = await prisma.loss.create({ data: { date, cropId, varietyId: refs.varietyId, lotId: refs.lotId, quantity, unitId: unit.id, reasonId: reason.id, notes: cleanName(body.notes) || null }, include: { crop: true, variety: true, lot: true, unit: true, reason: true } })
-  return NextResponse.json(row, { status: 201 })
+  try {
+    const body = await request.json() as Record<string, unknown>
+
+    const date = parseDate(body.date)
+    const harvestId =
+      typeof body.harvestId === 'string' ? body.harvestId : ''
+    const quantity = parsePositiveDecimal(body.quantity)
+    const reasonName = cleanName(body.reason)
+
+    if (!date || !harvestId || !quantity || !reasonName) {
+      return NextResponse.json(
+        { error: 'Selecciona una cosecha e indica fecha, cantidad y motivo.' },
+        { status: 400 }
+      )
+    }
+
+    const row = await prisma.$transaction(async (tx) => {
+      const harvest = await tx.harvest.findFirst({
+        where: { id: harvestId, status: 'ACTIVE' },
+      })
+
+      if (!harvest) {
+        throw new Error('La cosecha seleccionada no existe o está inactiva.')
+      }
+
+      const [losses, allocations] = await Promise.all([
+        tx.loss.aggregate({
+          where: { harvestId, status: 'ACTIVE' },
+          _sum: { quantity: true },
+        }),
+        tx.shipmentAllocation.aggregate({
+          where: { harvestId },
+          _sum: { quantity: true },
+        }),
+      ])
+
+      const harvested = Number(harvest.quantity)
+      const alreadyLost = Number(losses._sum.quantity ?? 0)
+      const alreadyShipped = Number(allocations._sum.quantity ?? 0)
+      const available = harvested - alreadyLost - alreadyShipped
+
+      if (quantity > available) {
+        throw new Error(
+          `Cantidad superior a la disponible. Existencias de esta cosecha: ${Math.max(0, available)} ${harvest.unitId ? '' : ''}.`
+        )
+      }
+
+      const normalizedName = normalizeName(reasonName)
+
+      const reason = await tx.lossReason.upsert({
+        where: { normalizedName },
+        update: { name: reasonName, active: true },
+        create: { name: reasonName, normalizedName },
+      })
+
+      return tx.loss.create({
+        data: {
+          harvestId,
+          date,
+          quantity,
+          reasonId: reason.id,
+          notes: cleanName(body.notes) || null,
+        },
+        include: lossInclude,
+      })
+    })
+
+    return NextResponse.json(row, { status: 201 })
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : 'No se pudo registrar la merma.'
+
+    if (
+      message.includes('no existe') ||
+      message.includes('disponible')
+    ) {
+      return NextResponse.json({ error: message }, { status: 400 })
+    }
+
+    console.error('Error al registrar merma:', error)
+
+    return NextResponse.json(
+      { error: 'No se pudo registrar la merma.' },
+      { status: 500 }
+    )
+  }
 }

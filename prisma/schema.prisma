@@ -7,146 +7,146 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum ProductionAreaType {
+  LOT
+  ZONE
+}
+
 model Crop {
-  id              String           @id @default(cuid())
-  name            String
-  normalizedName  String           @unique
-  hasVarieties    Boolean          @default(false)
-  hasLots         Boolean          @default(false)
-  tracksSurface   Boolean          @default(false)
-  hasOtherDetails Boolean          @default(false)
-  active          Boolean          @default(true)
-  unitId          String?
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
+  id                 String    @id @default(cuid())
+  name               String
+  normalizedName     String    @unique
+  hasVarieties       Boolean   @default(false)
+  hasProductionAreas Boolean   @default(false)
+  tracksSurface      Boolean   @default(false)
+  hasOtherDetails    Boolean   @default(false)
+  active             Boolean   @default(true)
+  unitId             String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  deletedAt          DateTime?
+
   unit            Unit?            @relation(fields: [unitId], references: [id])
   varieties       Variety[]
-  lots            Lot[]
-  zones           Zone[]
+  productionAreas ProductionArea[]
   harvests        Harvest[]
-  losses          Loss[]
-  shipments       Shipment[]
+  shipmentItems   ShipmentItem[]
   costAllocations CostAllocation[]
 
   @@index([active, createdAt])
 }
 
 model Variety {
-  id             String     @id @default(cuid())
+  id             String    @id @default(cuid())
   cropId         String
   name           String
   normalizedName String
-  active         Boolean    @default(true)
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
-  crop           Crop       @relation(fields: [cropId], references: [id])
-  harvests       Harvest[]
-  losses         Loss[]
-  shipments      Shipment[]
+  active         Boolean   @default(true)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  crop          Crop           @relation(fields: [cropId], references: [id])
+  harvests      Harvest[]
+  shipmentItems ShipmentItem[]
 
   @@unique([cropId, normalizedName])
   @@index([cropId, active])
 }
 
-model Lot {
-  id             String     @id @default(cuid())
+model ProductionArea {
+  id             String             @id @default(cuid())
   cropId         String
   name           String
   normalizedName String
-  surface        Decimal?   @db.Decimal(12, 2)
-  surfaceUnit    String?    @default("ha")
+  type           ProductionAreaType
+  surface        Decimal?
+  surfaceUnit    String?
   notes          String?
-  active         Boolean    @default(true)
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
-  crop           Crop       @relation(fields: [cropId], references: [id])
-  harvests       Harvest[]
-  losses         Loss[]
-  shipments      Shipment[]
+  active         Boolean            @default(true)
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  deletedAt      DateTime?
+
+  crop          Crop           @relation(fields: [cropId], references: [id])
+  harvests      Harvest[]
+  shipmentItems ShipmentItem[]
 
   @@unique([cropId, normalizedName])
-  @@index([cropId, active])
-}
-
-model Zone {
-  id             String   @id @default(cuid())
-  cropId         String
-  name           String
-  normalizedName String
-  active         Boolean  @default(true)
-  createdAt      DateTime @default(now())
-  crop           Crop     @relation(fields: [cropId], references: [id])
-
-  @@unique([cropId, normalizedName])
-  @@index([cropId, active])
 }
 
 model Unit {
-  id        String     @id @default(cuid())
-  name      String     @unique
-  active    Boolean    @default(true)
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
-  crops     Crop[]
-  harvests  Harvest[]
-  losses    Loss[]
-  shipments Shipment[]
+  id        String    @id @default(cuid())
+  name      String    @unique
+  active    Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  crops         Crop[]
+  harvests      Harvest[]
+  shipmentItems ShipmentItem[]
 
   @@index([active])
 }
 
 model Harvest {
-  id        String   @id @default(cuid())
-  date      DateTime
-  cropId    String
-  varietyId String?
-  lotId     String?
-  quantity  Decimal  @db.Decimal(12, 2)
-  unitId    String
-  notes     String?
-  status    String   @default("ACTIVE")
-  createdBy String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  crop      Crop     @relation(fields: [cropId], references: [id])
-  variety   Variety? @relation(fields: [varietyId], references: [id])
-  lot       Lot?     @relation(fields: [lotId], references: [id])
-  unit      Unit     @relation(fields: [unitId], references: [id])
+  id                 String    @id @default(cuid())
+  date               DateTime
+  cropId             String
+  varietyId          String?
+  productionAreaId   String?
+  quantity           Decimal   @db.Decimal(12, 2)
+  unitId             String
+  estimatedUnitPrice Decimal?  @db.Decimal(12, 2)
+  notes              String?
+  status             String    @default("ACTIVE")
+  createdBy          String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  deletedAt          DateTime?
+
+  crop           Crop                 @relation(fields: [cropId], references: [id])
+  variety        Variety?             @relation(fields: [varietyId], references: [id])
+  productionArea ProductionArea?      @relation(fields: [productionAreaId], references: [id])
+  unit           Unit                 @relation(fields: [unitId], references: [id])
+  losses         Loss[]
+  allocations    ShipmentAllocation[]
 
   @@index([date, cropId])
   @@index([status])
+  @@index([createdAt])
 }
 
 model LossReason {
-  id             String   @id @default(cuid())
-  name           String   @unique
-  normalizedName String   @unique
-  active         Boolean  @default(true)
-  createdAt      DateTime @default(now())
-  losses         Loss[]
+  id             String    @id @default(cuid())
+  name           String    @unique
+  normalizedName String    @unique
+  active         Boolean   @default(true)
+  createdAt      DateTime  @default(now())
+  deletedAt      DateTime?
+
+  losses Loss[]
 }
 
 model Loss {
-  id        String     @id @default(cuid())
+  id        String    @id @default(cuid())
+  harvestId String
   date      DateTime
-  cropId    String
-  varietyId String?
-  lotId     String?
-  quantity  Decimal    @db.Decimal(12, 2)
-  unitId    String
+  quantity  Decimal   @db.Decimal(12, 2)
   reasonId  String
   notes     String?
-  status    String     @default("ACTIVE")
+  status    String    @default("ACTIVE")
   createdBy String?
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
-  crop      Crop       @relation(fields: [cropId], references: [id])
-  variety   Variety?   @relation(fields: [varietyId], references: [id])
-  lot       Lot?       @relation(fields: [lotId], references: [id])
-  unit      Unit       @relation(fields: [unitId], references: [id])
-  reason    LossReason @relation(fields: [reasonId], references: [id])
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
 
-  @@index([date, cropId])
+  harvest Harvest    @relation(fields: [harvestId], references: [id])
+  reason  LossReason @relation(fields: [reasonId], references: [id])
+
+  @@index([harvestId, date])
+  @@index([status])
 }
 
 model CostCategory {
@@ -156,72 +156,143 @@ model CostCategory {
   active         Boolean           @default(true)
   subcategories  CostSubcategory[]
   costs          Cost[]
+  deletedAt      DateTime?
 }
 
 model CostSubcategory {
-  id             String       @id @default(cuid())
+  id             String    @id @default(cuid())
   categoryId     String
   name           String
   normalizedName String
-  active         Boolean      @default(true)
-  category       CostCategory @relation(fields: [categoryId], references: [id])
-  costs          Cost[]
+  active         Boolean   @default(true)
+  deletedAt      DateTime?
+
+  category CostCategory @relation(fields: [categoryId], references: [id])
+  costs    Cost[]
 
   @@unique([categoryId, normalizedName])
 }
 
 model Cost {
-  id              String           @id @default(cuid())
+  id              String    @id @default(cuid())
   date            DateTime
   description     String
   categoryId      String
   subcategoryId   String?
-  amountUsd       Decimal          @db.Decimal(12, 2)
+  amountUsd       Decimal   @db.Decimal(12, 2)
   notes           String?
-  applicationType String           @default("GENERAL")
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
-  category        CostCategory     @relation(fields: [categoryId], references: [id])
-  subcategory     CostSubcategory? @relation(fields: [subcategoryId], references: [id])
-  allocations     CostAllocation[]
+  applicationType String    @default("GENERAL")
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+
+  category    CostCategory     @relation(fields: [categoryId], references: [id])
+  subcategory CostSubcategory? @relation(fields: [subcategoryId], references: [id])
+  allocations CostAllocation[]
 
   @@index([date, categoryId])
 }
 
 model CostAllocation {
-  id        String   @id @default(cuid())
+  id        String    @id @default(cuid())
   costId    String
   cropId    String?
-  amountUsd Decimal? @db.Decimal(12, 2)
-  percent   Decimal? @db.Decimal(7, 4)
-  cost      Cost     @relation(fields: [costId], references: [id])
-  crop      Crop?    @relation(fields: [cropId], references: [id])
+  amountUsd Decimal?  @db.Decimal(12, 2)
+  percent   Decimal?  @db.Decimal(7, 4)
+  deletedAt DateTime?
+
+  cost Cost  @relation(fields: [costId], references: [id])
+  crop Crop? @relation(fields: [cropId], references: [id])
 
   @@index([costId])
 }
 
 model Shipment {
-  id             String   @id @default(cuid())
-  date           DateTime
-  cropId         String
-  varietyId      String?
-  lotId          String?
-  quantity       Decimal  @db.Decimal(12, 2)
-  marketQuantity Decimal? @db.Decimal(12, 2)
-  unitId         String
-  unitPrice      Decimal  @db.Decimal(12, 2)
-  totalAmount    Decimal  @db.Decimal(14, 2)
-  notes          String?
-  status         String   @default("ACTIVE")
-  createdBy      String?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-  crop           Crop     @relation(fields: [cropId], references: [id])
-  variety        Variety? @relation(fields: [varietyId], references: [id])
-  lot            Lot?     @relation(fields: [lotId], references: [id])
-  unit           Unit     @relation(fields: [unitId], references: [id])
+  id        String    @id @default(cuid())
+  code      String    @unique
+  date      DateTime
+  status    String    @default("IN_TRANSIT")
+  notes     String?
+  createdBy String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
 
-  @@index([date, cropId])
+  items      ShipmentItem[]
+  receptions Reception[]
+
+  @@index([date])
+  @@index([status])
+}
+
+model ShipmentItem {
+  id                   String    @id @default(cuid())
+  shipmentId           String
+  cropId               String
+  varietyId            String?
+  productionAreaId     String?
+  quantity             Decimal   @db.Decimal(12, 2)
+  unitId               String
+  estimatedUnitPrice   Decimal?  @db.Decimal(12, 2)
+  estimatedTotalAmount Decimal?  @db.Decimal(14, 2)
+  notes                String?
+  deletedAt            DateTime?
+
+  shipment       Shipment             @relation(fields: [shipmentId], references: [id])
+  crop           Crop                 @relation(fields: [cropId], references: [id])
+  variety        Variety?             @relation(fields: [varietyId], references: [id])
+  productionArea ProductionArea?      @relation(fields: [productionAreaId], references: [id])
+  unit           Unit                 @relation(fields: [unitId], references: [id])
+  allocations    ShipmentAllocation[]
+  receptionItems ReceptionItem[]
+
+  @@index([shipmentId])
+  @@index([cropId])
+}
+
+model ShipmentAllocation {
+  id             String    @id @default(cuid())
+  shipmentItemId String
+  harvestId      String
+  quantity       Decimal   @db.Decimal(12, 2)
+  createdAt      DateTime  @default(now())
+  deletedAt      DateTime?
+
+  shipmentItem ShipmentItem @relation(fields: [shipmentItemId], references: [id])
+  harvest      Harvest      @relation(fields: [harvestId], references: [id])
+
+  @@unique([shipmentItemId, harvestId])
+  @@index([harvestId])
+}
+
+model Reception {
+  id         String    @id @default(cuid())
+  shipmentId String
+  receivedAt DateTime  @default(now())
+  receivedBy String?
+  notes      String?
+  createdAt  DateTime  @default(now())
+  deletedAt  DateTime?
+
+  shipment Shipment        @relation(fields: [shipmentId], references: [id])
+  items    ReceptionItem[]
+
+  @@index([shipmentId, receivedAt])
+}
+
+model ReceptionItem {
+  id               String    @id @default(cuid())
+  receptionId      String
+  shipmentItemId   String
+  receivedQuantity Decimal   @db.Decimal(12, 2)
+  notes            String?
+  deletedAt        DateTime?
+
+  reception    Reception    @relation(fields: [receptionId], references: [id])
+  shipmentItem ShipmentItem @relation(fields: [shipmentItemId], references: [id])
+
+  @@unique([receptionId, shipmentItemId])
+  @@index([shipmentItemId])
 }
 
 model AuditLog {
@@ -235,4 +306,22 @@ model AuditLog {
   createdAt  DateTime @default(now())
 
   @@index([entity, entityId, createdAt])
+}
+
+model TrashEntry {
+  id           String    @id @default(cuid())
+  entityType   String
+  entityId     String
+  groupId      String    @default(cuid())
+  deletedAt    DateTime  @default(now())
+  purgeAt      DateTime
+  deletedBy    String?
+  restoredAt   DateTime?
+  restoredBy   String?
+  snapshotJson Json?
+
+  @@index([groupId])
+  @@index([entityType, entityId])
+  @@index([purgeAt, restoredAt])
+  @@index([deletedAt])
 }
