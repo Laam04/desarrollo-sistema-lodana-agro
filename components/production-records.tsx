@@ -88,8 +88,17 @@ export function ProductionRecords({ active }: { active: string }) {
   const isShipments = active === 'envios'
   const isCosts = active === 'costos'
 
+  const [harvestView, setHarvestView] = useState<'cosechas' | 'mermas'>(
+    'cosechas'
+  )
+  const isLosses = isHarvests && harvestView === 'mermas'
+
   const { data: crops = [] } = useSWR<Crop[]>('/api/crops', fetcher)
   const { data: units = [] } = useSWR<Unit[]>('/api/units', fetcher)
+  const { data: harvestOptions = [] } = useSWR<any[]>(
+  isLosses ? '/api/harvests' : null,
+  fetcher
+)
 
   const [from, setFrom] = useState('')
   const [to, setTo] = useState('')
@@ -99,7 +108,6 @@ export function ProductionRecords({ active }: { active: string }) {
   const [cropId, setCropId] = useState('')
   const selectedCrop = crops.find((crop) => crop.id === cropId)
   const [unitId, setUnitId] = useState('')
-  const [includeLoss, setIncludeLoss] = useState(false)
 
   const [shipmentLines, setShipmentLines] = useState<ShipmentLine[]>([
     emptyShipmentLine(),
@@ -109,16 +117,18 @@ export function ProductionRecords({ active }: { active: string }) {
   const [saving, setSaving] = useState(false)
 
   const endpoint = isHarvests
-    ? `/api/harvests?${new URLSearchParams({
+  ? isLosses
+    ? '/api/losses'
+    : `/api/harvests?${new URLSearchParams({
         ...(from ? { from } : {}),
         ...(to ? { to } : {}),
         ...(filterCropId ? { cropId: filterCropId } : {}),
       }).toString()}`
-    : isShipments
-      ? '/api/shipments'
-      : isCosts
-        ? '/api/costs'
-        : null
+  : isShipments
+    ? '/api/shipments'
+    : isCosts
+      ? '/api/costs'
+      : null
 
   const {
     data: rows = [],
@@ -186,20 +196,29 @@ export function ProductionRecords({ active }: { active: string }) {
     payload.cropId = cropId
     payload.unitId = unitId || selectedCrop?.unit?.id
 
-    if (!includeLoss) {
-      delete payload.lossQuantity
-      delete payload.lossReason
-      delete payload.lossDate
-      delete payload.lossNotes
-    }
-
     return fetch('/api/harvests', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     })
   }
+async function submitLoss(form: HTMLFormElement) {
+  const formData = new FormData(form)
 
+  const payload = {
+    date: formData.get('date'),
+    harvestId: formData.get('harvestId'),
+    quantity: formData.get('quantity'),
+    reason: formData.get('reason'),
+    notes: formData.get('notes'),
+  }
+
+  return fetch('/api/losses', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
   async function submitCost(form: HTMLFormElement) {
     const formData = new FormData(form)
     const payload = Object.fromEntries(formData.entries())
@@ -245,9 +264,11 @@ export function ProductionRecords({ active }: { active: string }) {
     try {
       let response: Response
 
-      if (isHarvests) {
-        response = await submitHarvest(form)
-      } else if (isShipments) {
+      if (isLosses) {
+  response = await submitLoss(form)
+} else if (isHarvests) {
+  response = await submitHarvest(form)
+} else if (isShipments) {
         response = await submitShipment(form)
       } else {
         response = await submitCost(form)
@@ -271,7 +292,6 @@ export function ProductionRecords({ active }: { active: string }) {
       form.reset()
       setCropId('')
       setUnitId('')
-      setIncludeLoss(false)
       setShipmentLines([emptyShipmentLine()])
 
       await mutate()
@@ -296,6 +316,33 @@ export function ProductionRecords({ active }: { active: string }) {
 
   return (
     <div className="mt-7 grid items-start gap-5 xl:grid-cols-[minmax(340px,0.85fr)_minmax(0,1.15fr)]">
+          {isHarvests && (
+      <div className="flex gap-2 rounded-xl border border-[#e1e9e1] bg-white/80 p-2 dark:border-[#2d3b32] dark:bg-[#18211c] xl:col-span-2">
+        <button
+          type="button"
+          onClick={() => setHarvestView('cosechas')}
+          className={`flex-1 rounded-lg px-4 py-2.5 text-sm font-semibold transition ${
+            harvestView === 'cosechas'
+              ? 'bg-[#2c6048] text-white'
+              : 'text-muted-foreground hover:bg-muted'
+          }`}
+        >
+          Cosechas
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setHarvestView('mermas')}
+          className={`flex-1 rounded-lg px-4 py-2.5 text-sm font-semibold transition ${
+            harvestView === 'mermas'
+              ? 'bg-[#2c6048] text-white'
+              : 'text-muted-foreground hover:bg-muted'
+          }`}
+        >
+          Mermas
+        </button>
+      </div>
+    )}
       <form
         onSubmit={submit}
         className="rounded-2xl border border-[#e1e9e1] bg-white/80 p-5 dark:border-[#2d3b32] dark:bg-[#18211c]"
@@ -328,7 +375,59 @@ export function ProductionRecords({ active }: { active: string }) {
             />
           </label>
 
-          {isHarvests && (
+          {isLosses && (
+            <>
+              <label className="grid gap-1.5 text-sm font-medium">
+                Cosecha asociada
+                <select
+                  required
+                  name="harvestId"
+                  className="rounded-xl border border-border bg-background px-3 py-2.5 text-sm"
+                >
+                  <option value="">Seleccionar cosecha</option>
+                  {harvestOptions.map((harvest) => (
+                    <option key={harvest.id} value={harvest.id}>
+                      {harvest.crop?.name || 'Cultivo'} — {formatDate(harvest.date)} — {harvest.quantity}{' '}
+                      {harvest.unit?.name || ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="grid gap-1.5 text-sm font-medium">
+                Cantidad de merma
+                <input
+                  required
+                  min="0.01"
+                  step="0.01"
+                  type="number"
+                  name="quantity"
+                  className="rounded-xl border border-border bg-background px-3 py-2.5 text-sm"
+                />
+              </label>
+
+              <label className="grid gap-1.5 text-sm font-medium">
+                Motivo
+                <input
+                  required
+                  name="reason"
+                  placeholder="Ej. producto dañado"
+                  className="rounded-xl border border-border bg-background px-3 py-2.5 text-sm"
+                />
+              </label>
+
+              <label className="grid gap-1.5 text-sm font-medium">
+                Observaciones
+                <textarea
+                  name="notes"
+                  rows={2}
+                  className="rounded-xl border border-border bg-background px-3 py-2.5 text-sm"
+                />
+              </label>
+            </>
+          )}
+
+          {isHarvests && !isLosses && (
             <>
               <label className="grid gap-1.5 text-sm font-medium">
                 Cultivo
@@ -428,69 +527,6 @@ export function ProductionRecords({ active }: { active: string }) {
                   Precio de referencia del mercado, no costo de producción.
                 </span>
               </label>
-
-              <div className="rounded-xl border border-border/80 p-4">
-                <label className="flex cursor-pointer items-start gap-3 text-sm font-medium">
-                  <input
-                    type="checkbox"
-                    checked={includeLoss}
-                    onChange={(event) => setIncludeLoss(event.target.checked)}
-                    className="mt-0.5 size-4 accent-[#2c6048]"
-                  />
-                  <span>
-                    Registrar merma de esta cosecha
-                    <span className="mt-1 block text-xs font-normal text-muted-foreground">
-                      Puedes registrar la pérdida al momento de ingresar la
-                      cosecha o hacerlo después.
-                    </span>
-                  </span>
-                </label>
-
-                {includeLoss && (
-                  <div className="mt-4 grid gap-3 border-t border-border/70 pt-4">
-                    <label className="grid gap-1.5 text-sm font-medium">
-                      Fecha de la merma
-                      <input
-                        type="date"
-                        name="lossDate"
-                        defaultValue={today()}
-                        className="rounded-xl border border-border bg-background px-3 py-2.5 text-sm"
-                      />
-                    </label>
-
-                    <label className="grid gap-1.5 text-sm font-medium">
-                      Cantidad perdida
-                      <input
-                        required
-                        min="0.01"
-                        step="0.01"
-                        type="number"
-                        name="lossQuantity"
-                        className="rounded-xl border border-border bg-background px-3 py-2.5 text-sm"
-                      />
-                    </label>
-
-                    <label className="grid gap-1.5 text-sm font-medium">
-                      Motivo
-                      <input
-                        required
-                        name="lossReason"
-                        placeholder="Ej. deterioro, daño, regalo"
-                        className="rounded-xl border border-border bg-background px-3 py-2.5 text-sm"
-                      />
-                    </label>
-
-                    <label className="grid gap-1.5 text-sm font-medium">
-                      Observaciones de la merma
-                      <textarea
-                        name="lossNotes"
-                        rows={2}
-                        className="rounded-xl border border-border bg-background px-3 py-2.5 text-sm"
-                      />
-                    </label>
-                  </div>
-                )}
-              </div>
 
               <label className="grid gap-1.5 text-sm font-medium">
                 Observaciones de la cosecha
@@ -924,8 +960,7 @@ function HistoryCard({
       (sum: number, loss: any) => sum + Number(loss.quantity || 0),
       0
     )
-    const available = Math.max(0, Number(row.quantity || 0) - lossTotal)
-
+const available = Math.max(0, Number(row.quantity || 0) - lossTotal)
     return (
       <article className="rounded-xl border border-border/70 p-4 text-sm">
         <div className="flex flex-wrap items-start justify-between gap-2">
@@ -955,11 +990,11 @@ function HistoryCard({
             </p>
           </div>
           <div>
-            <p className="text-xs text-muted-foreground">Disponible antes de envíos</p>
-            <p className="font-semibold">
-              {available.toFixed(2)} {row.unit?.name || ''}
-            </p>
-          </div>
+  <p className="text-xs text-muted-foreground">Producción útil</p>
+  <p className="font-semibold">
+    {Number(row.quantity || 0).toFixed(2)} {row.unit?.name || ''}
+  </p>
+</div>
         </div>
 
         {row.estimatedUnitPrice != null && (

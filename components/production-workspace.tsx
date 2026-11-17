@@ -54,10 +54,10 @@ const sectionCopy: Record<
       'Agrupa varios productos en un mismo envío y registra las cantidades y precios estimados de cada uno.',
   },
   cultivos: {
-    title: 'Cultivos y lotes',
-    description:
-      'Administra los cultivos, variedades, unidades y áreas productivas disponibles.',
-  },
+  title: 'Cultivos',
+  description:
+    'Administra los cultivos, variedades, unidades y áreas productivas disponibles.',
+},
 }
 
 export function ProductionWorkspace() {

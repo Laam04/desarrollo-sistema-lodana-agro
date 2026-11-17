@@ -1,12 +1,15 @@
 
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
-import { cleanName, normalizeName } from '@/lib/production-validation'
+import { cleanName } from '@/lib/production-validation'
 
 export async function GET() {
   try {
     const units = await prisma.unit.findMany({
-      where: { active: true },
+      where: {
+        active: true,
+        deletedAt: null,
+      },
       orderBy: { name: 'asc' },
     })
 
@@ -37,6 +40,16 @@ export async function POST(request: Request) {
         name: { equals: name, mode: 'insensitive' },
       },
     })
+
+    if (existing?.deletedAt) {
+      return NextResponse.json(
+        {
+          error:
+            'Esta unidad está en la papelera. Restáurala antes de volver a registrarla.',
+        },
+        { status: 409 }
+      )
+    }
 
     if (existing) {
       const unit = await prisma.unit.update({
@@ -74,9 +87,28 @@ export async function PATCH(request: Request) {
       )
     }
 
+    const existing = await prisma.unit.findUnique({
+      where: { id },
+    })
+
+    if (!existing) {
+      return NextResponse.json(
+        { error: 'Unidad no encontrada.' },
+        { status: 404 }
+      )
+    }
+
+    if (existing.deletedAt) {
+      return NextResponse.json(
+        { error: 'No se puede modificar una unidad que está en la papelera.' },
+        { status: 409 }
+      )
+    }
+
     const duplicate = await prisma.unit.findFirst({
       where: {
         name: { equals: name, mode: 'insensitive' },
+        deletedAt: null,
         NOT: { id },
       },
     })
@@ -112,6 +144,24 @@ export async function DELETE(request: Request) {
       return NextResponse.json(
         { error: 'Identificador de unidad obligatorio.' },
         { status: 400 }
+      )
+    }
+
+    const existing = await prisma.unit.findUnique({
+      where: { id },
+    })
+
+    if (!existing) {
+      return NextResponse.json(
+        { error: 'Unidad no encontrada.' },
+        { status: 404 }
+      )
+    }
+
+    if (existing.deletedAt) {
+      return NextResponse.json(
+        { error: 'La unidad ya está en la papelera.' },
+        { status: 409 }
       )
     }
 

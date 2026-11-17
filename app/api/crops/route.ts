@@ -87,20 +87,43 @@ async function syncVarieties(
   cropId: string,
   varieties: { name: string; normalizedName: string }[],
 ) {
+  const existingVarieties = await tx.variety.findMany({
+    where: {
+      cropId,
+      normalizedName: {
+        in: varieties.map((variety) => variety.normalizedName),
+      },
+    },
+  })
+
+  const trashedVariety = existingVarieties.find(
+    (variety) => variety.deletedAt !== null,
+  )
+
+  if (trashedVariety) {
+    throw new Error('VARIETY_IN_TRASH')
+  }
+
   await tx.variety.updateMany({
-    where: { cropId },
+    where: {
+      cropId,
+      deletedAt: null,
+    },
     data: { active: false },
   })
 
   for (const variety of varieties) {
-    const existing = await tx.variety.findFirst({
-      where: { cropId, normalizedName: variety.normalizedName },
-    })
+    const existing = existingVarieties.find(
+      (item) => item.normalizedName === variety.normalizedName,
+    )
 
     if (existing) {
       await tx.variety.update({
         where: { id: existing.id },
-        data: { name: variety.name, active: true },
+        data: {
+          name: variety.name,
+          active: true,
+        },
       })
     } else {
       await tx.variety.create({
@@ -120,15 +143,35 @@ async function syncProductionAreas(
   cropId: string,
   areas: AreaDraft[],
 ) {
+  const existingAreas = await tx.productionArea.findMany({
+    where: {
+      cropId,
+      normalizedName: {
+        in: areas.map((area) => area.normalizedName),
+      },
+    },
+  })
+
+  const trashedArea = existingAreas.find(
+    (area) => area.deletedAt !== null,
+  )
+
+  if (trashedArea) {
+    throw new Error('PRODUCTION_AREA_IN_TRASH')
+  }
+
   await tx.productionArea.updateMany({
-    where: { cropId },
+    where: {
+      cropId,
+      deletedAt: null,
+    },
     data: { active: false },
   })
 
   for (const area of areas) {
-    const existing = await tx.productionArea.findFirst({
-      where: { cropId, normalizedName: area.normalizedName },
-    })
+    const existing = existingAreas.find(
+      (item) => item.normalizedName === area.normalizedName,
+    )
 
     const data = {
       name: area.name,
@@ -188,7 +231,11 @@ async function validateUnit(unitId: string | null | undefined) {
   if (!unitId) return false
 
   const unit = await prisma.unit.findFirst({
-    where: { id: unitId, active: true },
+    where: {
+      id: unitId,
+      active: true,
+      deletedAt: null,
+    },
   })
 
   return Boolean(unit)
@@ -196,8 +243,14 @@ async function validateUnit(unitId: string | null | undefined) {
 
 const cropInclude = {
   unit: true,
-  varieties: true,
-  productionAreas: true,
+  varieties: {
+    where: { deletedAt: null },
+    orderBy: { name: 'asc' as const },
+  },
+  productionAreas: {
+    where: { deletedAt: null },
+    orderBy: { name: 'asc' as const },
+  },
 }
 
 export async function GET(request: NextRequest) {
@@ -206,15 +259,21 @@ export async function GET(request: NextRequest) {
       request.nextUrl.searchParams.get('includeInactive') === 'true'
 
     const crops = await prisma.crop.findMany({
-      where: includeInactive ? {} : { active: true },
+      where: includeInactive
+        ? { deletedAt: null }
+        : { active: true, deletedAt: null },
       include: {
         unit: true,
         varieties: {
-          where: includeInactive ? {} : { active: true },
+          where: includeInactive
+            ? { deletedAt: null }
+            : { active: true, deletedAt: null },
           orderBy: { name: 'asc' },
         },
         productionAreas: {
-          where: includeInactive ? {} : { active: true },
+          where: includeInactive
+            ? { deletedAt: null }
+            : { active: true, deletedAt: null },
           orderBy: { name: 'asc' },
         },
       },
@@ -226,7 +285,7 @@ export async function GET(request: NextRequest) {
     console.error('Error al consultar cultivos:', error)
     return NextResponse.json(
       { error: 'No se pudieron consultar los cultivos.' },
-      { status: 500 },
+      { status: 500 }
     )
   }
 }
@@ -251,8 +310,18 @@ export async function POST(request: NextRequest) {
     }
 
     const existing = await prisma.crop.findUnique({
-      where: { normalizedName: data.normalizedName },
-    })
+  where: { normalizedName: data.normalizedName },
+})
+
+if (existing?.deletedAt) {
+  return NextResponse.json(
+    {
+      error:
+        'Este cultivo está en la papelera. Restáuralo antes de volver a registrarlo.',
+    },
+    { status: 409 },
+  )
+}
 
 if (existing?.active) {
   return NextResponse.json(
@@ -298,12 +367,34 @@ if (existing?.active) {
 
     return NextResponse.json(crop, { status: existing ? 200 : 201 })
   } catch (error) {
-    console.error('Error al guardar cultivo:', error)
+  if (error instanceof Error && error.message === 'VARIETY_IN_TRASH') {
     return NextResponse.json(
-      { error: 'No se pudo guardar el cultivo.' },
-      { status: 500 },
+      {
+        error:
+          'Una de las variedades seleccionadas está en la papelera. Restáurala antes de utilizarla nuevamente.',
+      },
+      { status: 409 },
     )
   }
+  if (
+  error instanceof Error &&
+  error.message === 'PRODUCTION_AREA_IN_TRASH'
+) {
+  return NextResponse.json(
+    {
+      error:
+        'Una de las áreas productivas seleccionadas está en la papelera. Restáurala antes de utilizarla nuevamente.',
+    },
+    { status: 409 },
+  )
+}
+
+  console.error('Error al guardar cultivo:', error)
+  return NextResponse.json(
+    { error: 'No se pudo guardar el cultivo.' },
+    { status: 500 },
+  )
+}
 }
 
 export async function PATCH(request: NextRequest) {
@@ -327,6 +418,13 @@ export async function PATCH(request: NextRequest) {
         { status: 404 },
       )
     }
+    if (existing.deletedAt) {
+  return NextResponse.json(
+    { error: 'No se puede modificar un cultivo que está en la papelera.' },
+    { status: 409 },
+  )
+}
+
     // Permite reactivar o desactivar sin modificar el catálogo.
     if (typeof body.active === 'boolean' && body.name === undefined) {
       const crop = await prisma.crop.update({
@@ -394,12 +492,22 @@ export async function PATCH(request: NextRequest) {
 
     return NextResponse.json(crop)
   } catch (error) {
-    console.error('Error al actualizar cultivo:', error)
+  if (error instanceof Error && error.message === 'VARIETY_IN_TRASH') {
     return NextResponse.json(
-      { error: 'No se pudo actualizar el cultivo.' },
-      { status: 500 },
+      {
+        error:
+          'Una de las variedades seleccionadas está en la papelera. Restáurala antes de utilizarla nuevamente.',
+      },
+      { status: 409 },
     )
   }
+
+  console.error('Error al actualizar cultivo:', error)
+  return NextResponse.json(
+    { error: 'No se pudo actualizar el cultivo.' },
+    { status: 500 },
+  )
+}
 }
 
 
@@ -423,7 +531,9 @@ export async function DELETE(request: NextRequest) {
       if (!crop) {
         return { type: 'NOT_FOUND' as const }
       }
-
+      if (crop.deletedAt) {
+        return { type: 'ALREADY_DELETED' as const }
+      }
       if (body.confirmName.trim() !== crop.name) {
         return { type: 'INVALID_CONFIRMATION' as const }
       }
@@ -482,6 +592,13 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json(
         { error: 'El cultivo no existe o ya está en la papelera.' },
         { status: 404 },
+      )
+    }
+
+    if (result.type === 'ALREADY_DELETED') {
+      return NextResponse.json(
+        { error: 'El cultivo ya está en la papelera.' },
+        { status: 409 },
       )
     }
 

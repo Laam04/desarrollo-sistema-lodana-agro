@@ -12,13 +12,24 @@ import {
 
 const harvestInclude = {
   crop: true,
-  variety: true,
-  productionArea: true,
+  variety: {
+    where: { deletedAt: null },
+  },
+  productionArea: {
+    where: { deletedAt: null },
+  },
   unit: true,
   losses: {
-    where: { status: 'ACTIVE', deletedAt: null },
-    include: { reason: true },
-    orderBy: { date: 'desc' as const },
+    where: {
+      status: 'ACTIVE',
+      deletedAt: null,
+    },
+    include: {
+      reason: true,
+    },
+    orderBy: {
+      date: 'desc' as const,
+    },
   },
 }
 
@@ -30,10 +41,15 @@ export async function GET(request: Request) {
     const from = searchParams.get('from')
     const to = searchParams.get('to')
 
-    const where: {
+   const where: {
   status: string
   deletedAt: Date | null
   cropId?: string
+  crop?: {
+    is: {
+      deletedAt: null
+    }
+  }
   date?: {
     gte?: Date
     lt?: Date
@@ -41,6 +57,11 @@ export async function GET(request: Request) {
 } = {
   status: 'ACTIVE',
   deletedAt: null,
+  crop: {
+    is: {
+      deletedAt: null,
+    },
+  },
 }
 
     if (cropId) where.cropId = cropId
@@ -212,19 +233,32 @@ export async function POST(request: Request) {
       if (lossQuantity && lossReason && lossDate) {
         const normalizedReason = normalizeName(lossReason)
 
-        const reason = await tx.lossReason.upsert({
-          where: {
-            normalizedName: normalizedReason,
-          },
-          update: {
-            name: lossReason,
-            active: true,
-          },
-          create: {
-            name: lossReason,
-            normalizedName: normalizedReason,
-          },
-        })
+        const existingReason = await tx.lossReason.findUnique({
+  where: {
+    normalizedName: normalizedReason,
+  },
+})
+
+if (existingReason?.deletedAt) {
+  throw new Error('LOSS_REASON_IN_TRASH')
+}
+
+const reason = existingReason
+  ? await tx.lossReason.update({
+      where: {
+        id: existingReason.id,
+      },
+      data: {
+        name: lossReason,
+        active: true,
+      },
+    })
+  : await tx.lossReason.create({
+      data: {
+        name: lossReason,
+        normalizedName: normalizedReason,
+      },
+    })
 
         await tx.loss.create({
           data: {
@@ -244,7 +278,20 @@ export async function POST(request: Request) {
     })
 
     return NextResponse.json(row, { status: 201 })
-  } catch (error) {
+    } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === 'LOSS_REASON_IN_TRASH'
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            'La razón de merma está en la papelera. Restáurala antes de utilizarla.',
+        },
+        { status: 409 }
+      )
+    }
+
     console.error('Error al registrar cosecha:', error)
 
     return NextResponse.json(

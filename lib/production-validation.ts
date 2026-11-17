@@ -28,11 +28,25 @@ export async function validateCropReferences(
   cropId: string
 ) {
   const crop = await prisma.crop.findFirst({
-    where: { id: cropId, active: true },
-    include: {
-      varieties: { where: { active: true } },
-      productionAreas: { where: { active: true } },
+    where: {
+  id: cropId,
+  active: true,
+  deletedAt: null,
+},
+include: {
+  varieties: {
+    where: {
+      active: true,
+      deletedAt: null,
     },
+  },
+  productionAreas: {
+    where: {
+      active: true,
+      deletedAt: null,
+    },
+  },
+},
   })
 
   if (!crop) {
@@ -73,6 +87,10 @@ export async function validateUnit(unitId: unknown) {
   if (!id) return null
 
   return prisma.unit.findFirst({
-    where: { id, active: true },
+    where: {
+      id,
+      active: true,
+      deletedAt: null,
+    },
   })
 }

@@ -2,7 +2,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 
-const RESTORABLE_TYPES = ['crop', 'variety', 'productionArea'] as const
+const RESTORABLE_TYPES = [
+  'crop',
+  'variety',
+  'productionArea',
+  'harvest',
+  'loss',
+] as const
 
 type RestorableType = (typeof RESTORABLE_TYPES)[number]
 
@@ -10,6 +16,8 @@ const RESTORE_ORDER: Record<RestorableType, number> = {
   crop: 1,
   variety: 2,
   productionArea: 3,
+  harvest: 4,
+  loss: 5,
 }
 
 export async function POST(request: NextRequest) {
@@ -60,10 +68,10 @@ export async function POST(request: NextRequest) {
         entries.map((entry) => [entry.entityType + ':' + entry.entityId, entry]),
       )
 
-      // Si se restaura una variedad o área individual,
-      // también se recupera su cultivo si está eliminado.
+            // Recuperar automáticamente los registros padres necesarios.
       if (!body.groupId && selected.entityType !== 'crop') {
         const model = (tx as any)[selected.entityType]
+
         const record = await model.findUnique({
           where: { id: selected.entityId },
         })
@@ -72,29 +80,73 @@ export async function POST(request: NextRequest) {
           return { type: 'RECORD_MISSING' as const }
         }
 
-        const crop = await tx.crop.findUnique({
-          where: { id: record.cropId },
-        })
+        let cropId: string | null = null
 
-        if (!crop) {
-          return { type: 'PARENT_MISSING' as const }
+        // Variedad, área productiva o cosecha.
+        if (
+          selected.entityType === 'variety' ||
+          selected.entityType === 'productionArea' ||
+          selected.entityType === 'harvest'
+        ) {
+          cropId = record.cropId
         }
 
-        if (crop.deletedAt) {
-          const cropEntry = await tx.trashEntry.findFirst({
-            where: {
-              entityType: 'crop',
-              entityId: crop.id,
-              restoredAt: null,
-              purgeAt: { gt: now },
-            },
+        // Una merma necesita recuperar primero su cosecha.
+        if (selected.entityType === 'loss') {
+          const harvest = await tx.harvest.findUnique({
+            where: { id: record.harvestId },
           })
 
-          if (!cropEntry) {
+          if (!harvest) {
             return { type: 'PARENT_MISSING' as const }
           }
 
-          toRestore.set('crop:' + crop.id, cropEntry)
+          if (harvest.deletedAt) {
+            const harvestEntry = await tx.trashEntry.findFirst({
+              where: {
+                entityType: 'harvest',
+                entityId: harvest.id,
+                restoredAt: null,
+                purgeAt: { gt: now },
+              },
+            })
+
+            if (!harvestEntry) {
+              return { type: 'PARENT_MISSING' as const }
+            }
+
+            toRestore.set('harvest:' + harvest.id, harvestEntry)
+          }
+
+          cropId = harvest.cropId
+        }
+
+        // Recuperar el cultivo si también está eliminado.
+        if (cropId) {
+          const crop = await tx.crop.findUnique({
+            where: { id: cropId },
+          })
+
+          if (!crop) {
+            return { type: 'PARENT_MISSING' as const }
+          }
+
+          if (crop.deletedAt) {
+            const cropEntry = await tx.trashEntry.findFirst({
+              where: {
+                entityType: 'crop',
+                entityId: crop.id,
+                restoredAt: null,
+                purgeAt: { gt: now },
+              },
+            })
+
+            if (!cropEntry) {
+              return { type: 'PARENT_MISSING' as const }
+            }
+
+            toRestore.set('crop:' + crop.id, cropEntry)
+          }
         }
       }
 
