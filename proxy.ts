@@ -10,6 +10,14 @@ export function proxy(request: NextRequest) {
   const api = pathname.startsWith('/api/')
   const read = ['GET', 'HEAD', 'OPTIONS'].includes(request.method)
 
+  if (pathname === '/consultas' && read) return NextResponse.next()
+  if (pathname === '/api/public-analytics') {
+    if (read) return NextResponse.next()
+    return NextResponse.json({ error: 'El servicio de consultas es de solo lectura.' }, {
+      status: 405, headers: { Allow: 'GET, HEAD, OPTIONS', 'Cache-Control': 'no-store' },
+    })
+  }
+
   if (api && !read) {
     const origin = request.headers.get('origin')
     const host = request.headers.get('host')

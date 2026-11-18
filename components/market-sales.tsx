@@ -4,13 +4,14 @@ import { useDeferredValue, useRef, useState, type FormEvent } from 'react'
 import { Banknote, Download, Pencil, Plus, Search, ShoppingBasket, Trash2 } from 'lucide-react'
 import useSWR from 'swr'
 import { ApiError, formatDate, invalidateProduction, productionFetch } from '@/lib/production-client'
-import { cents, decimalInput, farmSupplier, marketDay, paymentLabels, receiptCode, salesValue, sheetColumns, units, usd, type PageResult, type Payment, type SaleRow, type SalesDay, type StockRow } from '@/lib/market-data'
+import { cents, decimalInput, farmSupplier, formatMarkup, marketDay, marketWeek, markupPercent, receiptCode, salesValue, sheetColumns, units, usd, type PageResult, type SaleRow, type SalesDay, type StockRow } from '@/lib/market-data'
 import { MarketDialog, MarketError, MarketPagination, marketUi } from '@/components/market-ui'
 
 const salesApi = '/api/market-sales'
 
 export function MarketSales() {
   const [date, setDate] = useState(marketDay)
+  const [period, setPeriod] = useState<'day' | 'week'>('week')
   const [page, setPage] = useState(1)
   const [editing, setEditing] = useState<SaleRow | null>(null)
   const [cancelling, setCancelling] = useState<SaleRow | null>(null)
@@ -19,7 +20,9 @@ export function MarketSales() {
   const [notice, setNotice] = useState('')
   const editorRef = useRef<HTMLDivElement>(null)
 
-  const { data, error, mutate } = useSWR<SalesDay>(salesApi + '?' + new URLSearchParams({ date, page: String(page) }), productionFetch)
+  const { data, error, mutate } = useSWR<SalesDay>(salesApi + '?' + new URLSearchParams({ date, period, page: String(page) }), productionFetch)
+  const week = period === 'week' ? marketWeek(date) : null
+  const dateLabel = week ? `${formatDate(week.from)} al ${formatDate(week.to)}` : formatDate(date)
 
   function changeDate(value: string) {
     if (!value) return
@@ -33,7 +36,7 @@ export function MarketSales() {
     setEditing(null)
     setNotice(message)
     setPage(1)
-    void invalidateProduction(salesApi)
+    void invalidateProduction(salesApi, '/api/production-summary')
   }
 
   async function cancelSale() {
@@ -57,25 +60,34 @@ export function MarketSales() {
 
   return (
     <div className="grid gap-5">
-      <section className={`${marketUi.panel} p-4 sm:p-5`} aria-label="Fecha y cierre diario">
+      <section className={`${marketUi.panel} p-4 sm:p-5`} aria-label="Período de ventas">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <label className="grid gap-1 text-sm font-medium">
-            Fecha del registro
+            Fecha de venta
             <input type="date" value={date} max={marketDay()} className={marketUi.input} onChange={(event) => changeDate(event.target.value)} />
           </label>
-          <a download className={marketUi.button} href={salesApi + '?' + new URLSearchParams({ date, export: 'csv' })}>
+          <label className="grid gap-1 text-sm font-medium">
+            Ver registros por
+            <select className={marketUi.input} value={period} onChange={(event) => {
+              setPeriod(event.target.value === 'day' ? 'day' : 'week')
+              setPage(1)
+            }}>
+              <option value="week">Semana</option>
+              <option value="day">Día</option>
+            </select>
+          </label>
+          <a download className={marketUi.button} href={salesApi + '?' + new URLSearchParams({ date, period, export: 'csv' })}>
             <Download className="size-4" aria-hidden /> Exportar a Excel (CSV)
           </a>
         </div>
-        <dl className="mt-4 grid gap-2 sm:grid-cols-3">
+        <dl className="mt-4 grid gap-2 sm:grid-cols-2">
           {([
-            ['Total efectivo', data?.totals.CASH],
-            ['Total transferencia', data?.totals.TRANSFER],
-            ['Total del día', data?.totals.total],
+            ['Ventas registradas', data ? units(data.totals.count) : undefined],
+            ['Total vendido', data ? usd(data.totals.total) : undefined],
           ] as const).map(([label, total], index) => (
-            <div key={label} className={`rounded-xl border border-border px-4 py-3 ${index === 2 ? 'bg-emerald-50 dark:bg-emerald-950/35' : 'bg-muted/40'}`}>
+            <div key={label} className={`rounded-xl border border-border px-4 py-3 ${index === 1 ? 'bg-emerald-50 dark:bg-emerald-950/35' : 'bg-muted/40'}`}>
               <dt className="text-xs font-medium text-muted-foreground">{label}</dt>
-              <dd className="mt-1 text-xl font-semibold tabular-nums">{total === undefined ? '—' : usd(total)}</dd>
+              <dd className="mt-1 text-xl font-semibold tabular-nums">{total ?? '—'}</dd>
             </div>
           ))}
         </dl>
@@ -83,22 +95,22 @@ export function MarketSales() {
 
       {notice && <p role="status" className="rounded-xl bg-emerald-100 p-3 text-sm text-emerald-900 dark:bg-emerald-950 dark:text-emerald-100">{notice}</p>}
       <div ref={editorRef} className="scroll-mt-24">
-        <SaleEditor key={date + ':' + (editing?.id ?? 'new')} date={date} editing={editing} onSaved={saved} stopEditing={() => setEditing(null)} />
+        <SaleEditor key={date + ':' + (editing?.id ?? 'new')} date={editing?.date.slice(0, 10) ?? date} editing={editing} onSaved={saved} stopEditing={() => setEditing(null)} />
       </div>
 
       <section className={`${marketUi.panel} overflow-hidden`} aria-labelledby="market-day-heading">
         <header className={marketUi.header}>
-          <h3 id="market-day-heading" className="flex items-center gap-2 font-semibold"><Banknote className="size-5 text-emerald-700 dark:text-emerald-300" aria-hidden /> Registro del {formatDate(date)}</h3>
+          <h3 id="market-day-heading" className="flex items-center gap-2 font-semibold"><Banknote className="size-5 text-emerald-700 dark:text-emerald-300" aria-hidden /> Ventas del {dateLabel}</h3>
         </header>
         {error && <div className="p-4"><MarketError message={error.message} retry={() => void mutate()} /></div>}
         {!error && !data && <p role="status" className="p-4 text-sm text-muted-foreground">Cargando ventas…</p>}
-        {data?.rows.length === 0 && <p className="p-5 text-sm text-muted-foreground">Todavía no hay ventas para esta fecha.</p>}
+        {data?.rows.length === 0 && <p className="p-5 text-sm text-muted-foreground">Todavía no hay ventas en este período.</p>}
         {data?.rows.length ? (
-          <div className="overflow-x-auto" tabIndex={0} aria-label="Hoja diaria de ventas">
+          <div className="overflow-x-auto" tabIndex={0} aria-label="Hoja de ventas">
             <table className="w-full text-sm">
               <thead className={marketUi.tableHead}>
                 <tr>
-                  {[...sheetColumns, 'Forma de pago', 'Acciones'].map((label) => <th key={label} scope="col" className="whitespace-nowrap px-3 py-3 font-semibold">{label}</th>)}
+                  {[...sheetColumns, 'Precio de Producción', 'Ganancia sobre costo', 'Acciones'].map((label) => <th key={label} scope="col" className="whitespace-nowrap px-3 py-3 font-semibold">{label}</th>)}
                 </tr>
               </thead>
               <tbody>
@@ -115,7 +127,8 @@ export function MarketSales() {
                     <td className="px-3 py-3">{sale.product.unit}</td>
                     <td className="whitespace-nowrap px-3 py-3 tabular-nums">{usd(sale.unitPrice)}</td>
                     <td className="whitespace-nowrap px-3 py-3 font-semibold tabular-nums">{usd(sale.total)}</td>
-                    <td className="whitespace-nowrap px-3 py-3">{paymentLabels[sale.payment]}</td>
+                    <td className="whitespace-nowrap px-3 py-3 tabular-nums">{usd(sale.product.productionUnitPrice)}</td>
+                    <td className="whitespace-nowrap px-3 py-3 tabular-nums">{formatMarkup(markupPercent(sale.unitPrice, sale.product.productionUnitPrice))}</td>
                     <td className="px-3 py-3">
                       <div className="flex gap-1">
                         <button type="button" title="Editar venta" aria-label={`Editar venta de ${sale.product.crop}`} className={`${marketUi.button} px-2`} onClick={() => {
@@ -154,7 +167,6 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
   const [product, setProduct] = useState<SaleRow['product'] | null>(editing?.product ?? null)
   const [quantity, setQuantity] = useState(editing?.quantity ?? '')
   const [price, setPrice] = useState(editing?.unitPrice ?? '')
-  const [payment, setPayment] = useState<Payment | ''>(editing?.payment ?? '')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [retrying, setRetrying] = useState(false)
@@ -174,7 +186,7 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
   const estimate = salesValue(quantity, price)
   const amount = cents(quantity)
   const exceeds = available !== undefined && amount !== null && amount > (cents(available) ?? 0)
-  const payload = { date, receptionItemId: product?.id, quantity: decimalInput(quantity), unitPrice: decimalInput(price), payment }
+  const payload = { date, receptionItemId: product?.id, quantity: decimalInput(quantity), unitPrice: decimalInput(price) }
   const snapshot = JSON.stringify(payload)
   const canRetry = retrying && replay.current?.draft === snapshot
 
@@ -182,8 +194,8 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
     event.preventDefault()
     if (busy) return
     setError('')
-    if (!product || (!canRetry && (available === undefined || exceeds)) || !amount || !cents(price) || !payment || estimate === null) {
-      setError('Indica un producto disponible, una cantidad y un precio positivos de hasta dos decimales, y la forma de pago.')
+    if (!product || (!canRetry && (available === undefined || exceeds)) || !amount || !cents(price) || estimate === null) {
+      setError('Selecciona un producto disponible e ingresa una cantidad y un precio positivos de hasta dos decimales.')
       return
     }
     if (replay.current?.draft !== snapshot) replay.current = { draft: snapshot, id: crypto.randomUUID() }
@@ -215,19 +227,21 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
   return (
     <section className={`${marketUi.panel} overflow-hidden`} aria-labelledby="market-sale-editor">
       <header className={marketUi.header}>
-        <h3 id="market-sale-editor" className="flex items-center gap-2 font-semibold"><ShoppingBasket className="size-5 text-emerald-700 dark:text-emerald-300" aria-hidden />{editing ? 'Editar venta' : 'Registrar venta'}</h3>
+        <h3 id="market-sale-editor" className="flex items-center gap-2 font-semibold"><ShoppingBasket className="size-5 text-emerald-700 dark:text-emerald-300" aria-hidden />{editing ? 'Editar venta' : 'Registrar venta'} · {formatDate(date)}</h3>
       </header>
       <form onSubmit={save} className="grid gap-4 p-4 sm:p-5">
         <div className="grid gap-3 md:grid-cols-2">
           <label className="relative grid gap-1 text-sm font-medium">
-            Buscar en los recibos
+            Buscar productos con saldo
             <Search className="pointer-events-none absolute bottom-2.5 left-3 size-4 text-muted-foreground" aria-hidden />
-            <input type="search" placeholder="Recibo, producto o envío" value={query} maxLength={120} onChange={(event) => { setQuery(event.target.value); setPage(1) }} className={`${marketUi.input} pl-9`} />
+            <input type="search" placeholder="Ej. Plátano, REC-001 o ENV-…" aria-describedby="market-stock-search-help" value={query} maxLength={120} onChange={(event) => { setQuery(event.target.value); setPage(1) }} className={`${marketUi.input} pl-9`} />
           </label>
           <label className="grid gap-1 text-sm font-medium">
             Producto del recibo
             <select required value={product?.id ?? ''} className={marketUi.input} onChange={(event) => {
-              setProduct(products.find((item) => item.id === event.target.value) ?? null)
+              const item = products.find((item) => item.id === event.target.value) ?? null
+              setProduct(item)
+              setPrice(item?.customerUnitPrice ?? '')
               setError('')
             }}>
               <option value="">Selecciona un producto</option>
@@ -238,6 +252,10 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
             </select>
           </label>
         </div>
+        <p id="market-stock-search-help" role="status" className="text-xs text-muted-foreground">
+          {query ? (data ? `${products.length} coincidencias en esta página. Selecciona el producto del recibo para vender.` : 'Buscando productos con saldo…')
+            : 'El buscador filtra el selector por producto, código de recibo o código de envío.'}
+        </p>
         <MarketPagination page={page} hasNext={data?.hasNext} selectPage={setPage} />
         {stockError && <MarketError message={stockError.message} retry={() => void reloadStock()} />}
         {selectionError && <MarketError message={selectionError.message} retry={() => void reloadSelection()} />}
@@ -255,16 +273,16 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
             <input required inputMode="decimal" maxLength={13} value={quantity} onChange={(event) => setQuantity(event.target.value)} aria-invalid={exceeds} className={marketUi.input} />
           </label>
           <label className="grid gap-1 text-sm font-medium">
-            Precio unitario ($)
+            Precio al cliente ($)
             <input required inputMode="decimal" maxLength={13} value={price} onChange={(event) => setPrice(event.target.value)} className={marketUi.input} />
           </label>
-          <label className="grid gap-1 text-sm font-medium">
-            Forma de pago
-            <select required value={payment} onChange={(event) => setPayment(event.target.value as Payment | '')} className={marketUi.input}>
-              <option value="">Selecciona</option>
-              {Object.entries(paymentLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-            </select>
-          </label>
+          <div className="grid gap-1 text-sm font-medium">
+            <span>Ganancia sobre costo</span>
+            <output className="rounded-xl bg-muted/50 px-3 py-2 font-semibold tabular-nums">
+              {formatMarkup(markupPercent(price, product?.productionUnitPrice ?? null))}
+              {product?.productionUnitPrice != null && <span className="ml-2 text-xs font-normal text-muted-foreground">Producción {usd(product.productionUnitPrice)}</span>}
+            </output>
+          </div>
           <div className="grid gap-1 text-sm font-medium">
             <span>Valor total ($)</span>
             <output className="rounded-xl bg-emerald-50 px-3 py-2 font-semibold tabular-nums dark:bg-emerald-950/35">{usd(estimate)}</output>

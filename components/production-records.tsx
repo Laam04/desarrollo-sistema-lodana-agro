@@ -1,6 +1,7 @@
 "use client";
 
 import useSWR from "swr";
+import { CostCategoryField } from "@/components/cost-category-field";
 import { formatDate, invalidateProduction, productionFetch, today } from "@/lib/production-client";
 import { receiptCode } from "@/lib/market-data";
 import { editableShipmentStatuses, shipmentStatusLabels } from "@/lib/shipment-status";
@@ -117,7 +118,7 @@ type HistoryRow = {
   reason?: { name: string };
   affectsHarvest?: boolean | null;
   description?: string;
-  category?: { name: string };
+  category?: { id: string; name: string };
   amountUsd?: Quantity;
   applicationType?: string;
   allocations?: { cropId: string | null; crop: Crop | null; amountUsd: Quantity | null }[];
@@ -539,7 +540,8 @@ export function ProductionRecords({ active }: { active: string }) {
     (editingRecord?.crop?.id === cropId ? editingRecord?.crop : undefined);
   const [unitId, setUnitId] = useState("");
   const [costApplication, setCostApplication] = useState("GENERAL");
-  const [costCropId, setCostCropId] = useState("");
+  const [costCropIds, setCostCropIds] = useState<string[]>([]);
+  const [costCategoryId, setCostCategoryId] = useState("");
 
   const [message, setMessage] = useState<Message | null>(null);
   const [saving, setSaving] = useState(false);
@@ -934,7 +936,8 @@ export function ProductionRecords({ active }: { active: string }) {
     setCropId("");
     setUnitId("");
     setCostApplication("GENERAL");
-    setCostCropId("");
+    setCostCropIds([]);
+    setCostCategoryId("");
     setFormDate(today());
   }
 
@@ -946,7 +949,8 @@ export function ProductionRecords({ active }: { active: string }) {
     setLinkedHarvest(row.harvest ?? null);
     setLossHarvestId(row.harvestId ?? "");
     setCostApplication(row.applicationType === "CROP" || row.allocations?.length ? "CROP" : "GENERAL");
-    setCostCropId(row.allocations?.length === 1 ? row.allocations[0].cropId ?? "" : "");
+    setCostCropIds(row.allocations?.flatMap((item) => item.cropId ? [item.cropId] : []) ?? []);
+    setCostCategoryId(row.category?.id ?? "");
     setMessage(null);
     formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
@@ -968,12 +972,8 @@ export function ProductionRecords({ active }: { active: string }) {
       payload.affectsHarvest = payload.affectsHarvest === 'true';
     } else if (isHarvests) {
       payload.cropId = cropId;
-    } else if (isCosts && costApplication === 'CROP' && costCropId) {
-      const prior = editingRecord?.allocations?.length === 1 ? editingRecord.allocations[0] : undefined;
-      const amountChanged = prior?.amountUsd != null && Number(prior.amountUsd) !== Number(payload.amountUsd);
-      if (prior?.cropId !== costCropId || amountChanged) {
-        payload.allocations = [{ cropId: costCropId, amountUsd: payload.amountUsd }];
-      }
+    } else if (isCosts && costApplication === 'CROP') {
+      payload.cropIds = costCropIds;
     }
     return productionFetch(endpoint, {
       method: editingRecord ? "PATCH" : "POST",
@@ -1032,10 +1032,11 @@ export function ProductionRecords({ active }: { active: string }) {
     return [
       { label: "Fecha", value: date },
       { label: "Descripción", value: String(fd.get("description") ?? "") },
-      { label: "Categoría", value: String(fd.get("category") ?? "") },
+      { label: "Categoría", value: (form.elements.namedItem('categoryId') as HTMLSelectElement | null)?.selectedOptions[0]?.text ?? "—" },
       { label: "Importe", value: formatAmount(fd.get("amountUsd")) },
       { label: 'Aplicación', value: costApplication === 'GENERAL' ? 'General' :
-        crops.find((crop) => crop.id === costCropId)?.name ?? editingRecord?.allocations?.map((item) => item.crop?.name).filter(Boolean).join(' · ') ?? 'Cultivo' },
+        costCropIds.map((id) => crops.find((crop) => crop.id === id)?.name ??
+          editingRecord?.allocations?.find((item) => item.cropId === id)?.crop?.name ?? id).join(' · ') },
     ];
   }
 
@@ -1050,6 +1051,10 @@ export function ProductionRecords({ active }: { active: string }) {
       return;
     }
 
+    if (isCosts && costApplication === 'CROP' && !costCropIds.length) {
+      setMessage({ kind: 'error', text: 'Selecciona al menos un cultivo.' });
+      return;
+    }
     // Cosechas, mermas y costos: confirmar antes de guardar
     setMessage(null);
     setSimpleConfirm(buildSummary(event.currentTarget));
@@ -1348,8 +1353,7 @@ export function ProductionRecords({ active }: { active: string }) {
                   </select>
                 </Field>
 
-                {((selectedCrop?.varieties?.length ?? 0) > 0 || (editingRecord?.cropId === cropId && editingRecord?.varietyId) ||
-                  (selectedCrop?.productionAreas?.length ?? 0) > 0 || (editingRecord?.cropId === cropId && editingRecord?.productionAreaId)) && (
+                {cropId && (
                   <div key={cropId} className={`${innerBox} grid gap-4 p-3`}>
                     {((selectedCrop?.varieties?.length ?? 0) > 0 || (editingRecord?.cropId === cropId && editingRecord?.varietyId)) && (
                       <Field label="Variedad">
@@ -1367,10 +1371,9 @@ export function ProductionRecords({ active }: { active: string }) {
                       </Field>
                     )}
 
-                    {((selectedCrop?.productionAreas?.length ?? 0) > 0 || (editingRecord?.cropId === cropId && editingRecord?.productionAreaId)) && (
-                      <Field label="Lote o zona">
-                        <select name="productionAreaId" defaultValue={editingRecord?.cropId === cropId ? editingRecord?.productionAreaId ?? '' : ''} className={inputCls}>
-                          <option value="">Sin especificar</option>
+                      <Field label="Zona" hint={!selectedCrop?.productionAreas?.length ? 'Vincula una zona al cultivo desde el catálogo.' : undefined}>
+                        <select required={!(editingRecord?.cropId === cropId && !editingRecord?.productionAreaId)} name="productionAreaId" defaultValue={editingRecord?.cropId === cropId ? editingRecord?.productionAreaId ?? '' : ''} className={inputCls}>
+                          <option value="">Seleccionar zona</option>
                           {editingRecord?.cropId === cropId && editingRecord?.productionAreaId && !selectedCrop?.productionAreas?.some((item) => item.id === editingRecord.productionAreaId) && (
                             <option value={editingRecord.productionAreaId}>{editingRecord.productionArea?.name ?? 'Área registrada'}</option>
                           )}
@@ -1381,7 +1384,6 @@ export function ProductionRecords({ active }: { active: string }) {
                           ))}
                         </select>
                       </Field>
-                    )}
                   </div>
                 )}
 
@@ -1453,16 +1455,7 @@ export function ProductionRecords({ active }: { active: string }) {
                   />
                 </Field>
 
-                <Field label="Categoría">
-                  <input
-                    required
-                    name="category"
-                    defaultValue={editingRecord?.category?.name ?? ''}
-                    maxLength={120}
-                    placeholder="Ej. insumos, transporte, mano de obra"
-                    className={inputCls}
-                  />
-                </Field>
+                <CostCategoryField value={costCategoryId} setValue={setCostCategoryId} original={editingRecord?.category} inputClass={inputCls} buttonClass={btnSmall} />
 
                 <div className="grid gap-4 sm:grid-cols-2">
                   <Field label="Importe (USD)">
@@ -1491,15 +1484,24 @@ export function ProductionRecords({ active }: { active: string }) {
                 </div>
 
                 {costApplication === 'CROP' && (
-                  <Field label="Cultivo del costo">
-                    <select name="costCropId" required={(editingRecord?.allocations?.length ?? 0) <= 1} value={costCropId} onChange={(event) => setCostCropId(event.target.value)} className={inputCls}>
-                      <option value="">{(editingRecord?.allocations?.length ?? 0) > 1 ? 'Conservar distribución actual' : 'Seleccionar cultivo'}</option>
-                      {editingRecord?.allocations?.length === 1 && editingRecord.allocations[0].crop?.id === costCropId && !crops.some((crop) => crop.id === costCropId) && (
-                        <option value={costCropId}>{editingRecord.allocations[0].crop.name}</option>
-                      )}
-                      {crops.map((crop) => <option key={crop.id} value={crop.id}>{crop.name}</option>)}
-                    </select>
-                  </Field>
+                  <fieldset className={`${innerBox} grid gap-2 p-3`}>
+                    <legend className="px-1 text-sm font-medium">Cultivos a los que se aplica</legend>
+                    <p className="text-xs text-muted-foreground">Marca uno o varios. Las selecciones nuevas se reparten por igual.</p>
+                    <div className="grid max-h-48 gap-2 overflow-y-auto">
+                      {[...crops, ...(editingRecord?.allocations ?? []).flatMap(({ crop }) =>
+                        crop && !crops.some((item) => item.id === crop.id) ? [crop] : []
+                      )].map((crop) => (
+                        <label key={crop.id} className="flex items-center gap-2 text-sm">
+                          <input type="checkbox" checked={costCropIds.includes(crop.id)} className="accent-emerald-700"
+                            onChange={(event) => {
+                              const checked = event.target.checked;
+                              setCostCropIds((current) => checked ? [...current, crop.id] : current.filter((id) => id !== crop.id));
+                            }} />
+                          {crop.name}
+                        </label>
+                      ))}
+                    </div>
+                  </fieldset>
                 )}
 
                 <Field label="Observaciones">
@@ -2567,7 +2569,7 @@ function HistoryCard({
               </p>
               {receptionsCount > 0 && (
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Recibido {Number(receivedByItem.get(item.id) ?? 0).toFixed(2)} · Pendiente {Math.max(0, Number(item.quantity) - (receivedByItem.get(item.id) ?? 0)).toFixed(2)} {item.unit?.name}
+                  Recibido {Number(receivedByItem.get(item.id) ?? 0).toFixed(2)} · {row.status === 'RECEIVED_WITH_DIFFERENCES' ? 'Diferencia' : 'Pendiente'} {Math.max(0, Number(item.quantity) - (receivedByItem.get(item.id) ?? 0)).toFixed(2)} {item.unit?.name}
                 </p>
               )}
             </div>
@@ -2640,102 +2642,5 @@ function HistoryCard({
       )}
       {actions}
     </CardShell>
-  );
-}
-
-/* ───────────────────── Resumen de producción ───────────────────── */
-
-type Summary = {
-  harvests: { _count: number };
-  losses: { _count: number };
-  costs: { _sum: { amountUsd: string | null } };
-  shipments: { _count: number; pending: number; received: number };
-  units: { unitId: string; unitName: string; harvested: string; losses: string; useful: string; shipped: string }[];
-};
-
-const quantityFormat = new Intl.NumberFormat('es-EC', { maximumFractionDigits: 2 });
-
-export function ProductionSummary() {
-  const { data, error, mutate } = useSWR<Summary>("/api/production-summary", fetcher);
-  const cards = [
-    { label: "Cosechas", value: data?.harvests._count, icon: Sprout, note: "Cosechas registradas" },
-    { label: "Mermas", value: data?.losses._count, icon: TrendingDown, note: "Mermas registradas" },
-    { label: "Costos", value: data ? formatAmount(data.costs._sum.amountUsd) : undefined, icon: Wallet, note: "Gastos registrados" },
-    {
-      label: "Envíos vigentes", value: data?.shipments._count, icon: Truck,
-      note: data ? `${data.shipments.pending} pendientes de recepción · ${data.shipments.received} recibidos` : undefined,
-    },
-  ];
-
-  return (
-    <section className="grid gap-5" aria-busy={!data && !error}>
-      {error && (
-        <div role="alert" className="flex items-center gap-2 rounded-xl bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950/30 dark:text-red-300">
-          <TriangleAlert className="size-4 shrink-0" />
-          {error.message}
-          <button type="button" className="ml-auto underline" onClick={() => void mutate()}>Reintentar</button>
-        </div>
-      )}
-
-      {(data || !error) && (
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          {cards.map(({ label, value, icon, note }) => (
-            <div key={label} className={`${card} p-5`}>
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-sm font-medium text-muted-foreground">{label}</p>
-                <IconBadge icon={icon} />
-              </div>
-              {data ? (
-                <>
-                  <p className="mt-4 text-2xl font-semibold tabular-nums">{value}</p>
-                  <p className="mt-1 text-xs text-muted-foreground">{note}</p>
-                </>
-              ) : (
-                <div className="mt-4 h-8 w-20 animate-pulse rounded-md bg-muted" />
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {data && (
-        <section className={`${card} overflow-hidden`} aria-labelledby="production-unit-totals">
-          <header className="flex items-center gap-3 border-b border-border/60 bg-emerald-50/50 p-5 dark:bg-emerald-950/20">
-            <IconBadge icon={Package} />
-            <div>
-              <h3 id="production-unit-totals" className="text-lg font-semibold">Producción por unidad</h3>
-              <p className="text-xs text-muted-foreground">La producción útil descuenta las mermas que afectan al inventario.</p>
-            </div>
-          </header>
-          {data.units.length ? (
-            <div className="overflow-x-auto" tabIndex={0} aria-label="Totales por unidad">
-              <table className="w-full min-w-[540px] text-sm">
-                <thead className="bg-muted/40 text-muted-foreground">
-                  <tr>
-                    {['Unidad', 'Cosechada', 'Mermas', 'Útil', 'Enviada'].map((label, index) => (
-                      <th key={label} scope="col" className={`px-5 py-3 font-medium ${index ? 'text-right' : 'text-left'}`}>{label}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border/60">
-                  {data.units.map((unit) => (
-                    <tr key={unit.unitId}>
-                      <th scope="row" className="px-5 py-3 text-left font-medium">{unit.unitName}</th>
-                      {[unit.harvested, unit.losses, unit.useful, unit.shipped].map((value, index) => (
-                        <td key={index} className={`px-5 py-3 text-right tabular-nums ${index === 2 ? 'font-semibold text-emerald-800 dark:text-emerald-300' : ''}`}>
-                          {quantityFormat.format(Number(value))}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <p className="p-5 text-sm text-muted-foreground">Registra una cosecha para consultar los totales por unidad.</p>
-          )}
-        </section>
-      )}
-    </section>
   );
 }

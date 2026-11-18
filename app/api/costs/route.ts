@@ -75,18 +75,34 @@ async function save(request: Request, update: boolean) {
     const date = parseDate(body.date)
     const description = cleanName(body.description)
     const categoryName = cleanName(body.category)
+    const categoryId = typeof body.categoryId === 'string' ? body.categoryId : ''
     const amountUsd = parsePositiveDecimal(body.amountUsd)
-    if (!date || !description || description.length > 200 || !categoryName || categoryName.length > 120 ||
+    if (!date || !description || description.length > 200 || (!categoryId && !categoryName) || categoryName.length > 120 ||
         !amountUsd || (update && !id)) {
       throw new ProductionError('Completa la fecha, descripción, categoría e importe positivo de hasta dos decimales.')
     }
-    const allocations = body.allocations === undefined ? undefined : readAllocations(body.allocations)
-    const applicationType = body.applicationType || (allocations?.length ? 'CROP' : 'GENERAL')
+    const explicit = body.allocations === undefined ? undefined : readAllocations(body.allocations)
+    const cropIds: unknown = body.cropIds
+    if (cropIds !== undefined && (!Array.isArray(cropIds) || !cropIds.length || cropIds.length > 100 ||
+      !cropIds.every((id) => typeof id === 'string' && id) || new Set(cropIds).size !== cropIds.length || explicit)) {
+      throw new ProductionError('Selecciona entre 1 y 100 cultivos distintos.')
+    }
+    const selected: string[] | undefined = Array.isArray(cropIds) ? cropIds : undefined
+    const applicationType = body.applicationType || (explicit?.length || selected?.length ? 'CROP' : 'GENERAL')
     if (applicationType !== 'CROP' && applicationType !== 'GENERAL') throw new ProductionError('Selecciona una aplicación válida.')
 
     const row = await prisma.$transaction(async (tx) => {
       const before = update ? await tx.cost.findFirst({ where: { id, deletedAt: null }, include: costInclude }) : null
       if (update && !before) throw new ProductionError('El costo no existe o está en la papelera.', 404)
+      const unchanged = selected && before && selected.length === before.allocations.length &&
+        selected.every((id) => before.allocations.some((row) => row.cropId === id)) &&
+        (before.amountUsd.eq(amountUsd) || before.allocations.every((row) => row.percent !== null && row.amountUsd === null))
+      const allocations = explicit ?? (selected && !unchanged ? selected.map((cropId, index) => ({
+        cropId,
+        amountUsd: null,
+        percent: new Prisma.Decimal(Math.floor(1_000_000 / selected.length) + (index < 1_000_000 % selected.length ? 1 : 0)).div(10_000),
+      })) : undefined)
+      if (applicationType === 'GENERAL' && selected) throw new ProductionError('Los costos generales no se asignan a cultivos.')
       const next = allocations ?? (applicationType === 'CROP' ? before?.allocations ?? [] : [])
       if (applicationType === 'CROP' && !next.length) throw new ProductionError('Selecciona el cultivo al que se aplica el costo.')
       if (applicationType === 'GENERAL' && next.length) throw new ProductionError('Los costos generales no se asignan a cultivos.')
@@ -102,10 +118,12 @@ async function save(request: Request, update: boolean) {
       }
 
       const normalizedName = normalizeName(categoryName)
-      const category = await tx.costCategory.upsert({
+      const category = categoryId ? await tx.costCategory.findFirst({
+        where: { id: categoryId, deletedAt: null, ...(before?.categoryId === categoryId ? {} : { active: true }) },
+      }) : await tx.costCategory.upsert({
         where: { normalizedName }, update: { active: true }, create: { name: categoryName, normalizedName },
       })
-      if (category.deletedAt) throw new ProductionError('Esta categoría está en la papelera.', 409)
+      if (!category || category.deletedAt) throw new ProductionError('Selecciona una categoría activa.', 409)
       const data = {
         date, description, categoryId: category.id, amountUsd, applicationType,
         notes: cleanName(body.notes).slice(0, 2000) || null,

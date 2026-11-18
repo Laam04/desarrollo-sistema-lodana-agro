@@ -101,6 +101,9 @@ async function save(request: Request, update: boolean) {
         varietyId: typeof body.varietyId === 'string' && body.varietyId ? body.varietyId : null,
         productionAreaId: typeof area === 'string' && area ? area : null,
       }
+      if (!ids.productionAreaId && (!before || before.cropId !== cropId || before.productionAreaId)) {
+        throw new ProductionError('Selecciona una zona para la cosecha.')
+      }
       await assertReferences(tx, ids, before ?? undefined)
 
       if (before) {

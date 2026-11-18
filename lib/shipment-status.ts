@@ -3,6 +3,7 @@ export const shipmentStatusLabels: Record<string, string> = {
   ACTIVE: 'En tránsito',
   PARTIALLY_RECEIVED: 'Recepción parcial',
   RECEIVED: 'Recibido',
+  RECEIVED_WITH_DIFFERENCES: 'Cerrado con diferencias',
   CANCELLED: 'Cancelado',
 }
 

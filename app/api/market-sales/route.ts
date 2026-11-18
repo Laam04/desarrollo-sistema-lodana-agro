@@ -5,7 +5,7 @@ import { currentActor, ProductionError, productionError, readBody } from '@/lib/
 import { historyQuery } from '@/lib/production-history'
 import { endOfDay } from '@/lib/production-stock'
 import { parseDate, parsePositiveDecimal } from '@/lib/production-validation'
-import { farmSupplier, marketDay, paymentLabels, receiptCode, sheetColumns } from '@/lib/market-data'
+import { farmSupplier, marketDay, marketWeek, markupPercent, receiptCode, sheetColumns } from '@/lib/market-data'
 
 const productInclude = {
   reception: { select: { receiptNumber: true, receivedAt: true, shipment: { select: { code: true } } } },
@@ -26,13 +26,15 @@ function productData(row: Product) {
     variety: row.shipmentItem.variety?.name ?? null,
     area: row.shipmentItem.productionArea?.name ?? null,
     unit: row.shipmentItem.unit.name,
+    productionUnitPrice: row.shipmentItem.estimatedUnitPrice,
+    customerUnitPrice: row.customerUnitPrice,
   }
 }
 
 function saleData(row: Sale) {
   return {
     id: row.id, date: row.date, quantity: row.quantity, unitPrice: row.unitPrice,
-    total: row.total, payment: row.payment, updatedAt: row.updatedAt, product: productData(row.receptionItem),
+    total: row.total, updatedAt: row.updatedAt, product: productData(row.receptionItem),
   }
 }
 
@@ -83,7 +85,7 @@ async function stock(request: Request, date: Date, params: URLSearchParams) {
 
 function spreadsheetCell(value: string) {
   // Excel interpreta cadenas iniciales como fórmulas incluso dentro de comillas.
-  const safe = /^[\s\uFEFF]*[=+\-@]|^[\t\r\n]/.test(value) ? "'" + value : value
+  const safe = !/^-?\d+(?:,\d+)?%?$/.test(value) && /^[\s\uFEFF]*[=+\-@]|^[\t\r\n]/.test(value) ? "'" + value : value
   return '"' + safe.replaceAll('"', '""') + '"'
 }
 
@@ -91,14 +93,17 @@ function exportSheet(rows: Sale[], date: string) {
   const localized = (value: Prisma.Decimal) => value.toFixed(2).replace('.', ',')
   const lines = rows.map((row) => {
     const product = productData(row.receptionItem)
+    const markup = markupPercent(row.unitPrice.toString(), product.productionUnitPrice?.toString() ?? null)
     return [
       row.date.toISOString().slice(0, 10), receiptCode(product.receiptNumber), farmSupplier,
       [product.crop, product.variety, product.area].filter(Boolean).join(' · '),
-      localized(row.quantity), product.unit, localized(row.unitPrice), localized(row.total), paymentLabels[row.payment],
+      localized(row.quantity), product.unit, localized(row.unitPrice), localized(row.total),
+      product.productionUnitPrice ? localized(product.productionUnitPrice) : '',
+      markup === null ? '' : markup.toFixed(2).replace('.', ',') + '%',
       product.shipmentCode,
     ]
   })
-  const csv = '\uFEFF' + [[...sheetColumns, 'Forma de pago', 'Envío'], ...lines]
+  const csv = '\uFEFF' + [[...sheetColumns, 'Precio de Producción ($)', 'Ganancia sobre costo (%)', 'Envío'], ...lines]
     .map((row) => row.map(spreadsheetCell).join(';')).join('\r\n')
   return new Response(csv, {
     headers: {
@@ -108,6 +113,30 @@ function exportSheet(rows: Sale[], date: string) {
   })
 }
 
+async function salesSummary(where: Prisma.MarketSaleWhereInput, from: string, to: string) {
+  const rows = await prisma.marketSale.findMany({
+    where,
+    select: { date: true, total: true, quantity: true, receptionItem: { select: { shipmentItem: { select: { estimatedUnitPrice: true } } } } },
+    orderBy: { date: 'asc' },
+  })
+  const days = new Map<string, { date: string; total: Prisma.Decimal; count: number }>()
+  let total = new Prisma.Decimal(0)
+  let profit = new Prisma.Decimal(0)
+  let missingCost = 0
+  for (const row of rows) {
+    const date = row.date.toISOString().slice(0, 10)
+    const day = days.get(date) ?? { date, total: new Prisma.Decimal(0), count: 0 }
+    day.total = day.total.plus(row.total)
+    day.count++
+    days.set(date, day)
+    total = total.plus(row.total)
+    const cost = row.receptionItem.shipmentItem.estimatedUnitPrice
+    if (cost?.gt(0)) profit = profit.plus(row.total.minus(cost.mul(row.quantity).toDecimalPlaces(2)))
+    else missingCost++
+  }
+  return { from, to, total, profit: rows.length > missingCost ? profit : null, count: rows.length, missingCost, days: [...days.values()] }
+}
+
 export async function GET(request: Request) {
   try {
     const params = new URL(request.url).searchParams
@@ -115,29 +144,29 @@ export async function GET(request: Request) {
     const date = parseDate(dateText)
     if (!date) throw new ProductionError('Indica una fecha válida.')
     if (params.get('view') === 'stock') return NextResponse.json(await stock(request, date, params))
-    const start = new Date(date)
-    start.setUTCHours(0, 0, 0, 0)
-    const where = { cancelledAt: null, date: { gte: start, lte: endOfDay(date) } }
+    const summary = params.get('view') === 'summary'
+    const weekly = summary || params.get('period') === 'week'
+    const { from, to } = weekly ? marketWeek(dateText) : { from: dateText, to: dateText }
+    const where = { cancelledAt: null, date: { gte: new Date(from + 'T00:00:00Z'), lte: endOfDay(new Date(to + 'T00:00:00Z')) } }
+    if (summary) return NextResponse.json(await salesSummary(where, from, to))
     if (params.get('export') === 'csv') {
       const rows = await prisma.marketSale.findMany({
-        where, include: saleInclude, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        where, include: saleInclude, orderBy: [{ date: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
       })
-      return exportSheet(rows, dateText)
+      return exportSheet(rows, weekly ? from + '_a_' + to : dateText)
     }
 
     const { take, skip, result } = historyQuery(request, 50)
     const [rows, totals] = await prisma.$transaction([
       prisma.marketSale.findMany({
-        where, include: saleInclude, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take, skip,
+        where, include: saleInclude, orderBy: [{ date: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }], take, skip,
       }),
-      prisma.marketSale.groupBy({ where, by: ['payment'], orderBy: { payment: 'asc' }, _sum: { total: true } }),
+      prisma.marketSale.aggregate({ where, _sum: { total: true }, _count: true }),
     ], { isolationLevel: 'RepeatableRead' })
-    const cash = totals.find((row) => row.payment === 'CASH')?._sum?.total ?? new Prisma.Decimal(0)
-    const transfer = totals.find((row) => row.payment === 'TRANSFER')?._sum?.total ?? new Prisma.Decimal(0)
     const data = result(rows.map(saleData))
     return NextResponse.json({
       ...(Array.isArray(data) ? { rows: data, hasNext: false } : data),
-      totals: { CASH: cash, TRANSFER: transfer, total: cash.plus(transfer) },
+      totals: { total: totals._sum.total ?? new Prisma.Decimal(0), count: totals._count }, from, to,
     })
   } catch (error) {
     return productionError(error, 'No se pudieron consultar los datos de ventas.')
@@ -145,18 +174,17 @@ export async function GET(request: Request) {
 }
 
 function draft(data: Record<string, unknown>) {
-  const { receptionItemId, payment } = data
+  const { receptionItemId } = data
   const date = parseDate(data.date)
   const quantity = parsePositiveDecimal(data.quantity)
   const unitPrice = parsePositiveDecimal(data.unitPrice)
   if (!date || String(data.date) > marketDay() || !quantity || !unitPrice ||
-    typeof receptionItemId !== 'string' || !receptionItemId ||
-    (payment !== 'CASH' && payment !== 'TRANSFER')) {
-    throw new ProductionError('Indica un recibo, una fecha hasta hoy, cantidad, precio positivo y forma de pago.')
+    typeof receptionItemId !== 'string' || !receptionItemId) {
+    throw new ProductionError('Indica un recibo, una fecha hasta hoy, cantidad y precio positivo.')
   }
   const total = new Prisma.Decimal(quantity).mul(unitPrice).toDecimalPlaces(2)
   if (total.gte('1000000000000')) throw new ProductionError('El importe de la venta supera el máximo permitido.')
-  return { receptionItemId, date, quantity, unitPrice, total, payment } as const
+  return { receptionItemId, date, quantity, unitPrice, total } as const
 }
 
 async function save(request: Request, editing: boolean) {
@@ -177,7 +205,7 @@ async function save(request: Request, editing: boolean) {
       if (existing && !editing) {
         const matches = !existing.cancelledAt && existing.receptionItemId === input.receptionItemId &&
           existing.date.getTime() === input.date.getTime() && existing.quantity.eq(input.quantity) &&
-          existing.unitPrice.eq(input.unitPrice) && existing.payment === input.payment
+          existing.unitPrice.eq(input.unitPrice)
         if (!matches) throw new ProductionError('La clave de solicitud ya corresponde a otra venta.', 409)
         return { sale: existing, created: false }
       }

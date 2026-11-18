@@ -5,20 +5,21 @@ import useSWR from 'swr'
 import Link from 'next/link'
 import { ClipboardCheck, Inbox, PackageCheck, Search, Truck } from 'lucide-react'
 import { ApiError, formatDate, formatTimestampDate, invalidateProduction, productionFetch } from '@/lib/production-client'
-import { cents, decimalInput, farmSupplier, receiptCode, units, usd, type MarketShipment, type MarketShipmentDetail, type PageResult } from '@/lib/market-data'
+import { cents, decimalInput, farmSupplier, formatMarkup, markupPercent, receiptCode, units, usd, type MarketShipment, type MarketShipmentDetail, type PageResult } from '@/lib/market-data'
 import { receivableStatuses, shipmentStatusLabels } from '@/lib/shipment-status'
 import { MarketDialog, MarketError, MarketPagination, marketUi } from '@/components/market-ui'
 
-type DraftLine = { quantity: string; notes: string }
+type DraftLine = { quantity: string; notes: string; customerUnitPrice: string }
 type ReceiptRequest = {
   requestId: string
   shipmentId: string
   notes: string
-  items: { shipmentItemId: string; receivedQuantity: string; notes: string }[]
+  closesWithDifferences: boolean
+  items: { shipmentItemId: string; receivedQuantity: string; customerUnitPrice: string; notes: string }[]
 }
 
 function Status({ status }: { status: string }) {
-  const tone = status === 'PARTIALLY_RECEIVED' ? 'bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200'
+  const tone = status === 'PARTIALLY_RECEIVED' || status === 'RECEIVED_WITH_DIFFERENCES' ? 'bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200'
     : status === 'CANCELLED' ? 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200'
       : 'bg-emerald-100 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200'
   return <span className={`inline-flex w-fit rounded-full px-2.5 py-1 text-xs font-semibold ${tone}`}>{shipmentStatusLabels[status] ?? 'Registrado'}</span>
@@ -113,6 +114,7 @@ export function MarketReceptions({ historical }: { historical: boolean }) {
                             return (
                               <li key={entry.id} className="rounded-lg bg-muted/50 px-3 py-2">
                                 <strong>{item?.crop.name ?? 'Producto'}</strong> · {units(entry.receivedQuantity)} {item?.unit.name}
+                                {entry.customerUnitPrice != null && <span> · Precio al cliente {usd(entry.customerUnitPrice)}</span>}
                                 {entry.notes && <p className="break-words text-xs text-muted-foreground">{entry.notes}</p>}
                               </li>
                             )
@@ -144,18 +146,21 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
   const canReceive = !historical && receivableStatuses.includes(shipment.status) && shipment.items.some((item) => Number(item.pendingQuantity) > 0)
   const [lines, setLines] = useState<Partial<Record<string, DraftLine>>>({})
   const [notes, setNotes] = useState('')
+  const [closeWithDifferences, setCloseWithDifferences] = useState(false)
   const [review, setReview] = useState<ReceiptRequest | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [retryError, setRetryError] = useState('')
 
   function line(id: string) {
-    return lines[id] ?? { quantity: '', notes: '' }
+    return lines[id] ?? { quantity: '', notes: '', customerUnitPrice: '' }
   }
 
   function change(id: string, value: Partial<DraftLine>) {
-    setLines((current) => ({ ...current, [id]: { quantity: '', notes: '', ...current[id], ...value } }))
+    setLines((current) => ({ ...current, [id]: { quantity: '', notes: '', customerUnitPrice: '', ...current[id], ...value } }))
   }
+
+  const hasDifference = shipment.items.some((item) => (cents(line(item.id).quantity) ?? 0) < (cents(item.pendingQuantity) ?? 0))
 
   function prepare(event: FormEvent) {
     event.preventDefault()
@@ -170,14 +175,20 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
         setError(`Revisa la cantidad de ${item.crop.name}. El saldo pendiente es de ${units(item.pendingQuantity)} ${item.unit.name}.`)
         return
       }
-      if (quantity > 0) items.push({ shipmentItemId: item.id, receivedQuantity: decimalInput(value.quantity), notes: value.notes })
+      if (quantity > 0) {
+        if (value.customerUnitPrice.trim() && !cents(value.customerUnitPrice)) {
+          setError(`Revisa el precio al cliente de ${item.crop.name}. Usa hasta dos decimales.`)
+          return
+        }
+        items.push({ shipmentItemId: item.id, receivedQuantity: decimalInput(value.quantity), customerUnitPrice: decimalInput(value.customerUnitPrice), notes: value.notes })
+      }
     }
     if (!items.length) {
       setError('Indica una cantidad recibida mayor que cero en al menos un producto.')
       return
     }
     setRetryError('')
-    setReview({ requestId: crypto.randomUUID(), shipmentId: shipment.id, notes, items })
+    setReview({ requestId: crypto.randomUUID(), shipmentId: shipment.id, notes, closesWithDifferences: hasDifference && closeWithDifferences, items })
   }
 
   async function confirm() {
@@ -190,6 +201,7 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
       })
       setLines({})
       setNotes('')
+      setCloseWithDifferences(false)
       setReview(null)
       onReceived(result.reception.receiptNumber)
     } catch (failure) {
@@ -218,20 +230,15 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
         </header>
         {shipment.notes && <p className="break-words px-4 pt-4 text-sm text-muted-foreground sm:px-5">{shipment.notes}</p>}
         {canReceive && (
-          <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 sm:px-5">
-            <p className="text-xs text-muted-foreground">Ingresa lo que llegó físicamente, en la unidad del envío.</p>
-            <button type="button" className={marketUi.button} onClick={() => {
-              setLines(Object.fromEntries(shipment.items.filter((item) => Number(item.pendingQuantity) > 0).map((item) => [item.id, { ...line(item.id), quantity: item.pendingQuantity }])))
-              setError('')
-            }}>Completar con el saldo pendiente</button>
-          </div>
+          <p className="px-4 py-3 text-xs text-muted-foreground sm:px-5">Ingresa la cantidad que llegó físicamente. El precio al cliente es opcional y se sugiere al registrar la venta.</p>
         )}
         <div className={canReceive ? 'overflow-x-auto' : 'mt-4 overflow-x-auto'} tabIndex={0} aria-label="Productos en el envío">
           <table className="w-full text-sm">
             <thead className={marketUi.tableHead}>
               <tr>
-                {['Producto', 'Unidad', 'Enviado', 'Recibido', 'Pendiente', 'Precio ref. ($)'].map((label) => <th key={label} scope="col" className="whitespace-nowrap px-3 py-3 font-semibold">{label}</th>)}
+                {['Producto', 'Unidad', 'Enviado', 'Recibido', shipment.status === 'RECEIVED_WITH_DIFFERENCES' ? 'Diferencia' : 'Pendiente', 'Precio de Producción ($)'].map((label) => <th key={label} scope="col" className="whitespace-nowrap px-3 py-3 font-semibold">{label}</th>)}
                 {canReceive && <th scope="col" className="min-w-44 whitespace-nowrap px-3 py-3 font-semibold">Recibir ahora</th>}
+                {canReceive && <th scope="col" className="min-w-40 whitespace-nowrap px-3 py-3 font-semibold">Precio al cliente ($)</th>}
               </tr>
             </thead>
             <tbody>
@@ -255,6 +262,14 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
                       </>
                     ) : <span className="text-xs text-muted-foreground">Completo</span>}
                   </td>}
+                  {canReceive && <td className="px-3 py-2 align-top">
+                    {Number(item.pendingQuantity) > 0 && (
+                      <>
+                        <input inputMode="decimal" maxLength={13} aria-label={`Precio al cliente de ${item.crop.name}`} value={line(item.id).customerUnitPrice} onChange={(event) => change(item.id, { customerUnitPrice: event.target.value })} className={marketUi.input} />
+                        <p className="mt-1 text-xs text-muted-foreground">Ganancia sobre costo {formatMarkup(markupPercent(line(item.id).customerUnitPrice, item.estimatedUnitPrice))}</p>
+                      </>
+                    )}
+                  </td>}
                 </tr>
               ))}
             </tbody>
@@ -262,6 +277,12 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
         </div>
         {canReceive && (
           <div className="grid gap-3 p-4 sm:p-5">
+            {hasDifference && (
+              <label className="flex items-start gap-2 rounded-xl border border-border bg-muted/30 p-3 text-sm">
+                <input type="checkbox" checked={closeWithDifferences} onChange={(event) => setCloseWithDifferences(event.target.checked)} className="mt-1 accent-emerald-700" />
+                <span><strong>Cerrar envío con diferencias</strong><span className="block text-xs text-muted-foreground">Márcalo si el faltante ya no llegará. Quedará registrado para Producción.</span></span>
+              </label>
+            )}
             <label className="grid gap-1.5 text-sm font-medium">
               Observación del recibo
               <textarea className={marketUi.input} rows={2} maxLength={2000} value={notes} onChange={(event) => setNotes(event.target.value)} />
@@ -278,11 +299,11 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
       </form>
       {review && (
         <MarketDialog title={`Confirmar recepción de ${shipment.code}`} action="Confirmar recepción" busy={busy} onConfirm={() => void confirm()} onCancel={() => setReview(null)}>
-          <p className="text-muted-foreground">Se generará un recibo por las cantidades indicadas. El saldo restante seguirá pendiente en el envío.</p>
+          <p className="text-muted-foreground">{review.closesWithDifferences ? 'Se registrará lo recibido y el faltante quedará como diferencia del envío.' : 'Se generará un recibo por las cantidades ingresadas.'}</p>
           <ul className="grid gap-1.5">
             {review.items.map((row) => {
               const item = shipment.items.find((product) => product.id === row.shipmentItemId)
-              return <li key={row.shipmentItemId} className="flex justify-between gap-3 rounded-lg bg-muted/60 p-2"><span>{item?.crop.name}{item?.productionArea ? ' · ' + item.productionArea.name : ''}</span><strong className="text-right">{units(row.receivedQuantity)} {item?.unit.name}</strong></li>
+              return <li key={row.shipmentItemId} className="flex justify-between gap-3 rounded-lg bg-muted/60 p-2"><span>{item?.crop.name}{item?.productionArea ? ' · ' + item.productionArea.name : ''}</span><strong className="text-right">{units(row.receivedQuantity)} {item?.unit.name}{row.customerUnitPrice && <small className="block">Al cliente {usd(row.customerUnitPrice)}</small>}</strong></li>
             })}
           </ul>
           {retryError && <MarketError message={retryError} />}

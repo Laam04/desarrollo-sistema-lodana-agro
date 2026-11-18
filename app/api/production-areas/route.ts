@@ -42,11 +42,13 @@ async function save(request: Request, update: boolean) {
 
       const previous = existing ?? duplicate
       const type = body.type === 'ZONE' || body.type === 'LOT' ? body.type : previous?.type ?? 'LOT'
+      const zone = await tx.zone.upsert({
+        where: { normalizedName }, update: {}, create: { name, normalizedName },
+      })
       const data = {
-        name, normalizedName, type,
+        name, normalizedName, type, zoneId: zone.id,
         surface: type === 'ZONE' ? null : body.surface === undefined ? previous?.surface : surface,
         surfaceUnit: type === 'ZONE' ? null : cleanName(body.surfaceUnit).slice(0, 24) || previous?.surfaceUnit || 'ha',
-        notes: body.notes === undefined ? previous?.notes : cleanName(body.notes).slice(0, 2000) || null,
         active: update ? previous?.active : true,
       }
       const area = previous ? await tx.productionArea.update({ where: { id: previous.id }, data })
@@ -67,10 +69,15 @@ export async function DELETE(request: Request) {
   try {
     const { id } = await readBody(request)
     if (typeof id !== 'string' || !id) throw new ProductionError('Indica el área que quieres desactivar.')
-    const result = await prisma.productionArea.updateMany({
-      where: { id, deletedAt: null }, data: { active: false },
-    })
-    if (!result.count) throw new ProductionError('Área productiva no encontrada.', 404)
+    await prisma.$transaction(async (tx) => {
+      const area = await tx.productionArea.findFirst({ where: { id, deletedAt: null }, include: { crop: true } })
+      if (!area) throw new ProductionError('Área productiva no encontrada.', 404)
+      if (!area.active) return
+      if (area.crop.active && !await tx.productionArea.count({
+        where: { cropId: area.cropId, active: true, deletedAt: null, id: { not: id } },
+      })) throw new ProductionError('Vincula otra zona antes de retirar la última del cultivo.', 409)
+      await tx.productionArea.update({ where: { id }, data: { active: false } })
+    }, { isolationLevel: 'Serializable' })
     return NextResponse.json({ message: 'Área productiva desactivada.' })
   } catch (error) {
     return productionError(error, 'No se pudo desactivar el área productiva.')

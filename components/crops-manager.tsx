@@ -3,12 +3,12 @@
 import useSWR from 'swr'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { invalidateProduction, productionFetch } from '@/lib/production-client'
+import { normalizeCatalogName } from '@/lib/production-validation'
 import {
   AlertTriangle,
   Archive,
   CheckCircle2,
   CircleHelp,
-  Layers,
   Leaf,
   Loader2,
   MapPin,
@@ -16,7 +16,6 @@ import {
   Pencil,
   Plus,
   RotateCcw,
-  Ruler,
   Search,
   Sprout,
   Trash2,
@@ -43,7 +42,7 @@ type ProductionArea = {
   type: 'LOT' | 'ZONE'
   surface: string | number | null
   surfaceUnit?: string | null
-  notes?: string | null
+  zoneId?: string | null
   active?: boolean
 }
 
@@ -61,14 +60,7 @@ type Crop = {
   productionAreas: ProductionArea[]
 }
 
-type AreaDraft = {
-  id?: string
-  name: string
-  type: 'LOT' | 'ZONE'
-  surface: string
-  surfaceUnit: string
-  notes: string
-}
+type Zone = { id: string; name: string }
 
 type Toast = { type: 'success' | 'error'; text: string } | null
 
@@ -80,14 +72,6 @@ type ConfirmState = {
   confirmName?: string
   onConfirm: () => void | Promise<void>
 } | null
-
-const emptyArea: AreaDraft = {
-  name: '',
-  type: 'LOT',
-  surface: '',
-  surfaceUnit: 'ha',
-  notes: '',
-}
 
 /* ───────────────────── Estilos reutilizables ───────────────────── */
 
@@ -391,12 +375,12 @@ export function CropsManager() {
   const units = allUnits.filter((unit) => unit.active)
 
   const [name, setName] = useState('')
-  const [hasProductionAreas, setHasProductionAreas] = useState(false)
   const [hasVarieties, setHasVarieties] = useState(false)
   const [varieties, setVarieties] = useState<string[]>([])
-  const [areas, setAreas] = useState<AreaDraft[]>([])
-  const [areaDraft, setAreaDraft] = useState<AreaDraft>({ ...emptyArea })
-  const [editingAreaIndex, setEditingAreaIndex] = useState<number | null>(null)
+  const [areas, setAreas] = useState<Zone[]>([])
+  const [zoneName, setZoneName] = useState('')
+  const [savingZone, setSavingZone] = useState(false)
+  const { data: zones = [], error: zonesError, mutate: refreshZones } = useSWR<Zone[]>('/api/zones', fetcher)
 
   const [unitId, setUnitId] = useState('')
   const [newUnit, setNewUnit] = useState('')
@@ -437,7 +421,7 @@ export function CropsManager() {
     !!editingCrop ||
     name.trim() !== '' ||
     areas.length > 0 ||
-    areaDraft.name.trim() !== '' ||
+    zoneName.trim() !== '' ||
     varieties.length > 0 ||
     unitId !== ''
 
@@ -454,12 +438,10 @@ export function CropsManager() {
 
   function resetForm() {
     setName('')
-    setHasProductionAreas(false)
     setHasVarieties(false)
     setVarieties([])
     setAreas([])
-    setAreaDraft({ ...emptyArea })
-    setEditingAreaIndex(null)
+    setZoneName('')
     setUnitId('')
     setNewUnit('')
     setEditingUnit(null)
@@ -471,7 +453,6 @@ export function CropsManager() {
     setError('')
     setEditingCrop(crop)
     setName(crop.name)
-    setHasProductionAreas(crop.hasProductionAreas)
     setHasVarieties(crop.hasVarieties)
     setUnitId(crop.unitId || crop.unit?.id || '')
 
@@ -481,21 +462,9 @@ export function CropsManager() {
         .map((variety) => variety.name),
     )
 
-    setAreas(
-      (crop.productionAreas || [])
-        .filter((area) => area.active !== false)
-        .map((area) => ({
-          id: area.id,
-          name: area.name,
-          type: area.type,
-          surface: area.surface == null ? '' : String(area.surface),
-          surfaceUnit: area.surfaceUnit || 'ha',
-          notes: area.notes || '',
-        })),
-    )
+    setAreas(crop.productionAreas.flatMap((area) => area.active !== false && area.zoneId ? [{ id: area.zoneId, name: area.name }] : []))
 
-    setAreaDraft({ ...emptyArea })
-    setEditingAreaIndex(null)
+    setZoneName('')
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
@@ -575,31 +544,27 @@ export function CropsManager() {
 
   /* ─── Áreas productivas ─── */
 
-  function addArea() {
-    const clean = areaDraft.name.trim().replace(/\s+/g, ' ')
-    if (!clean) return
-
-    const duplicate = areas.some((area, index) => index !== editingAreaIndex && area.name.localeCompare(clean, 'es-EC', { sensitivity: 'base' }) === 0)
-
-    if (duplicate) {
-      setError('Ya agregaste un área con ese nombre.')
-      return
-    }
-
-    if (
-      areaDraft.surface &&
-      (!Number.isFinite(Number(areaDraft.surface)) ||
-        Number(areaDraft.surface) < 0)
-    ) {
-      setError('La superficie debe ser un número válido.')
-      return
-    }
-
+  function linkZone(zone: Zone) {
+    setAreas((current) => current.some((item) => item.id === zone.id) ? current : [...current, zone])
     setError('')
-    const saved = { ...areaDraft, name: clean }
-    setAreas((current) => editingAreaIndex === null ? [...current, saved] : current.map((area, index) => index === editingAreaIndex ? saved : area))
-    setAreaDraft({ ...emptyArea })
-    setEditingAreaIndex(null)
+  }
+
+  async function addZone() {
+    const name = zoneName.trim()
+    if (!name || savingZone) return
+    setSavingZone(true)
+    try {
+      const zone = await productionFetch<Zone>('/api/zones', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+      })
+      linkZone(zone)
+      setZoneName('')
+      void refreshZones()
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'No se pudo guardar la zona.')
+    } finally {
+      setSavingZone(false)
+    }
   }
 
   /* ─── Guardar cultivo ─── */
@@ -617,13 +582,13 @@ export function CropsManager() {
       return
     }
 
-    if (hasProductionAreas && areas.length === 0) {
-      setError('Agrega al menos un lote o zona, o selecciona No.')
+    if (areas.length === 0) {
+      setError('Vincula al menos una zona al cultivo.')
       return
     }
 
-    if (hasProductionAreas && areaDraft.name.trim()) {
-      setError('Guarda el área en edición antes de guardar el cultivo.')
+    if (zoneName.trim()) {
+      setError('Agrega la zona escrita antes de guardar el cultivo.')
       return
     }
 
@@ -647,18 +612,8 @@ export function CropsManager() {
       ...(editingCrop ? { id: editingCrop.id } : {}),
       name,
       hasVarieties,
-      hasProductionAreas,
       varieties: hasVarieties ? varieties : [],
-      productionAreas: hasProductionAreas
-        ? areas.map((area) => ({
-            id: area.id,
-            name: area.name,
-            type: area.type,
-            surface: area.type === 'LOT' ? area.surface || null : null,
-            surfaceUnit: area.surfaceUnit,
-            notes: area.notes,
-          }))
-        : [],
+      zoneIds: areas.map((area) => area.id),
       unitId,
     }
 
@@ -678,7 +633,7 @@ export function CropsManager() {
           : 'Cultivo guardado correctamente.',
       )
 
-      void invalidateProduction('/api/crops', '/api/shipments/availability')
+      void invalidateProduction('/api/crops', '/api/shipments/availability', '/api/production-summary')
     } catch (error) {
       notify('error', error instanceof Error ? error.message : 'No se pudo guardar el cultivo.')
     } finally {
@@ -783,7 +738,7 @@ export function CropsManager() {
         />
         <StatCard
           icon={<MapPin className="size-5" />}
-          label="Lotes y zonas"
+          label="Zonas vinculadas"
           value={totalAreas}
         />
         <StatCard
@@ -839,200 +794,61 @@ export function CropsManager() {
                 required
                 maxLength={120}
                 value={name}
-                onChange={(event) => setName(event.target.value)}
+                onChange={(event) => {
+                  const value = event.target.value
+                  setName(value)
+                  if (!editingCrop) {
+                    const existing = crops.find((crop) => crop.active && normalizeCatalogName(crop.name) === normalizeCatalogName(value))
+                    if (existing?.unitId) setUnitId(existing.unitId)
+                  }
+                }}
                 placeholder="Ej. Plátano"
                 aria-label="Nombre del cultivo"
                 className={ui.input}
               />
+              {!editingCrop && name.trim() && crops.some((crop) => crop.active && normalizeCatalogName(crop.name) === normalizeCatalogName(name)) && (
+                <p className="text-xs text-muted-foreground">Las zonas seleccionadas se agregarán al cultivo registrado.</p>
+              )}
             </div>
 
             <hr className="border-[#e3ece4] dark:border-[#2d3b32]" />
 
-            {/* 2. Áreas */}
             <div className="grid gap-3">
-              <SectionTitle
-                step={2}
-                icon={<MapPin className="size-4" />}
-                title="¿Se organiza por lotes o zonas?"
-                hint="Útil para ubicar de dónde proviene cada cosecha."
-              />
-              <YesNo
-                value={hasProductionAreas}
-                onChange={setHasProductionAreas}
-              />
-
-              {hasProductionAreas && (
-                <div className={`grid gap-3 p-3 ${ui.inner}`}>
-                  <p className="text-xs text-muted-foreground">
-                    Puedes registrar lotes, zonas o ambos. La superficie es
-                    opcional.
-                  </p>
-
-                  {areas.length > 0 && (
-                    <div className="grid gap-2">
-                      {areas.map((area, index) => (
-                        <div
-                          key={`${area.name}-${index}`}
-                          className="flex items-center justify-between gap-3 rounded-lg border border-[#e3ece4] bg-white px-3 py-2 text-xs dark:border-[#2d3b32] dark:bg-[#141b17]"
-                        >
-                          <div className="flex items-start gap-2.5">
-                            <span
-                              className={`mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md ${ui.chip}`}
-                            >
-                              {area.type === 'LOT' ? (
-                                <Ruler className="size-3.5" />
-                              ) : (
-                                <Layers className="size-3.5" />
-                              )}
-                            </span>
-                            <div>
-                              <span className="text-sm font-medium">
-                                {area.name}
-                              </span>
-                              <span className="ml-2 text-muted-foreground">
-                                {area.type === 'LOT' ? 'Lote' : 'Zona'}
-                                {area.type === 'LOT' && area.surface
-                                  ? ` · ${area.surface} ${area.surfaceUnit}`
-                                  : ''}
-                              </span>
-                              {area.notes && (
-                                <p className="mt-0.5 text-muted-foreground">
-                                  {area.notes}
-                                </p>
-                              )}
-                            </div>
-                          </div>
-
-                          <div className="flex items-center gap-1">
-                          <button
-                            type="button"
-                            aria-label={`Editar ${area.name}`}
-                            onClick={() => { setAreaDraft({ ...area }); setEditingAreaIndex(index) }}
-                            className="rounded-md p-1 text-muted-foreground transition hover:bg-emerald-50 hover:text-emerald-700 dark:hover:bg-emerald-950/40"
-                          >
-                            <Pencil className="size-4" />
-                          </button>
-                          <button
-                            type="button"
-                            aria-label={`Quitar ${area.name}`}
-                            onClick={() => {
-                              setAreas((current) =>
-                                current.filter((_, i) => i !== index),
-                              )
-                              if (editingAreaIndex === index) {
-                                setAreaDraft({ ...emptyArea })
-                                setEditingAreaIndex(null)
-                              } else if (editingAreaIndex !== null && index < editingAreaIndex) {
-                                setEditingAreaIndex(editingAreaIndex - 1)
-                              }
-                            }}
-                            className="rounded-md p-1 text-muted-foreground transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
-                          >
-                            <X className="size-4" />
-                          </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  <div className="grid gap-2 rounded-lg border border-dashed border-[#cfdcd1] p-3 dark:border-[#34453a] sm:grid-cols-2">
-                    <input
-                      value={areaDraft.name}
-                      onChange={(event) =>
-                        setAreaDraft({ ...areaDraft, name: event.target.value })
-                      }
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter') {
-                          event.preventDefault()
-                          addArea()
-                        }
-                      }}
-                      placeholder="Nombre del área"
-                      aria-label="Nombre del área"
-                      maxLength={120}
-                      className={ui.input}
-                    />
-
-                    <select
-                      aria-label="Tipo de área"
-                      value={areaDraft.type}
-                      onChange={(event) =>
-                        setAreaDraft({
-                          ...areaDraft,
-                          type: event.target.value as 'LOT' | 'ZONE',
-                        })
-                      }
-                      className={ui.input}
-                    >
-                      <option value="LOT">Lote</option>
-                      <option value="ZONE">Zona</option>
-                    </select>
-
-                    {areaDraft.type === 'LOT' && (
-                      <>
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={areaDraft.surface}
-                          onChange={(event) =>
-                            setAreaDraft({
-                              ...areaDraft,
-                              surface: event.target.value,
-                            })
-                          }
-                          placeholder="Superficie"
-                          aria-label="Superficie"
-                          className={ui.input}
-                        />
-
-                        <select
-                          aria-label="Unidad de superficie"
-                          value={areaDraft.surfaceUnit}
-                          onChange={(event) =>
-                            setAreaDraft({
-                              ...areaDraft,
-                              surfaceUnit: event.target.value,
-                            })
-                          }
-                          className={ui.input}
-                        >
-                          <option value="ha">Hectáreas (ha)</option>
-                          <option value="m²">Metros cuadrados (m²)</option>
-                          {areaDraft.surfaceUnit !== 'ha' && areaDraft.surfaceUnit !== 'm²' && <option value={areaDraft.surfaceUnit}>{areaDraft.surfaceUnit}</option>}
-                        </select>
-                      </>
-                    )}
-
-                    <input
-                      value={areaDraft.notes}
-                      onChange={(event) =>
-                        setAreaDraft({ ...areaDraft, notes: event.target.value })
-                      }
-                      placeholder="Observaciones (opcional)"
-                      aria-label="Observaciones del área"
-                      maxLength={2000}
-                      className={`${ui.input} sm:col-span-2`}
-                    />
-
-                    <button
-                      type="button"
-                      onClick={addArea}
-                      disabled={!areaDraft.name.trim()}
-                      className={`${ui.btnGhost} sm:col-span-2`}
-                    >
-                      <Plus className="size-4" />
-                      {editingAreaIndex === null ? 'Agregar área' : 'Guardar área'}
-                    </button>
-                    {editingAreaIndex !== null && (
-                      <button type="button" className={`${ui.btnGhost} sm:col-span-2`} onClick={() => { setAreaDraft({ ...emptyArea }); setEditingAreaIndex(null) }}>
-                        Cancelar edición del área
-                      </button>
-                    )}
-                  </div>
+              <SectionTitle step={2} icon={<MapPin className="size-4" />} title="Zonas del cultivo" />
+              <div className={`grid gap-3 p-3 ${ui.inner}`}>
+                {areas.length > 0 && (
+                  <ul className="flex flex-wrap gap-2">
+                    {areas.map((zone) => (
+                      <li key={zone.id} className={`inline-flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm ${ui.chip}`}>
+                        {zone.name}
+                        <button type="button" aria-label={`Quitar zona ${zone.name}`} onClick={() => setAreas((current) => current.filter((item) => item.id !== zone.id))} className="rounded p-0.5 hover:bg-background/70"><X className="size-4" /></button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <select aria-label="Vincular una zona existente" value="" onChange={(event) => {
+                  const zone = zones.find((item) => item.id === event.target.value)
+                  if (zone) linkZone(zone)
+                }} className={ui.input}>
+                  <option value="">Seleccionar zona registrada</option>
+                  {zones.filter((zone) => !areas.some((area) => area.id === zone.id)).map((zone) => <option key={zone.id} value={zone.id}>{zone.name}</option>)}
+                </select>
+                <div className="flex flex-wrap gap-2">
+                  <input
+                    aria-label="Nombre de la zona"
+                    placeholder="Nombre de la zona"
+                    maxLength={120}
+                    value={zoneName}
+                    onChange={(event) => setZoneName(event.target.value)}
+                    onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void addZone() } }}
+                    className={`${ui.input} min-w-36 flex-1`}
+                  />
+                  <button type="button" disabled={!zoneName.trim() || savingZone} onClick={() => void addZone()} className={ui.btnGhost}>
+                    <Plus className="size-4" /> Agregar zona
+                  </button>
                 </div>
-              )}
+                {zonesError && <p role="alert" className="text-sm text-red-700 dark:text-red-300">{zonesError.message}</p>}
+              </div>
             </div>
 
             <hr className="border-[#e3ece4] dark:border-[#2d3b32]" />
@@ -1361,7 +1177,7 @@ export function CropsManager() {
                             <MapPin className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
                             {cropAreas.length === 0 ? (
                               <span className="text-muted-foreground">
-                                Sin áreas registradas
+                                Sin zonas registradas
                               </span>
                             ) : (
                               <div className="flex flex-wrap gap-1.5">
@@ -1370,7 +1186,6 @@ export function CropsManager() {
                                     key={area.id}
                                     className="rounded-md border border-[#e3ece4] bg-[#f6faf6] px-2 py-0.5 dark:border-[#2d3b32] dark:bg-[#1d2820]"
                                   >
-                                    {area.type === 'LOT' ? 'Lote' : 'Zona'}:{' '}
                                     <strong className="font-medium">
                                       {area.name}
                                     </strong>

@@ -1,8 +1,5 @@
 export const farmSupplier = 'Finca Lodana'
 
-export const paymentLabels = { CASH: 'Efectivo', TRANSFER: 'Transferencia' } as const
-export type Payment = keyof typeof paymentLabels
-
 export const sheetColumns = [
   'Fecha', 'N° Recibo / Lote', 'Productor / Proveedor', 'Producto',
   'Cantidad', 'Unidad', 'Precio Unitario ($)', 'Valor Total ($)',
@@ -14,6 +11,24 @@ const farmDay = new Intl.DateTimeFormat('en-CA', {
 
 export function marketDay(date = new Date()) {
   return farmDay.format(date)
+}
+
+export function marketWeek(day: string) {
+  const start = new Date(day + 'T00:00:00Z')
+  start.setUTCDate(start.getUTCDate() - (start.getUTCDay() + 6) % 7)
+  const end = new Date(start)
+  end.setUTCDate(end.getUTCDate() + 6)
+  return { from: start.toISOString().slice(0, 10), to: end.toISOString().slice(0, 10) }
+}
+
+export function markupPercent(price: string, base: string | null) {
+  const sale = cents(price)
+  const cost = base === null ? null : cents(base)
+  return sale !== null && sale > 0 && cost !== null && cost > 0 ? (sale - cost) / cost * 100 : null
+}
+
+export function formatMarkup(value: number | null) {
+  return value === null ? '—' : units(value) + '%'
 }
 
 export function receiptCode(number: number) {
@@ -47,7 +62,7 @@ export type MarketReceipt = {
   receiptNumber: number
   receivedAt: string
   notes: string | null
-  items: { id: string; shipmentItemId: string; receivedQuantity: string; notes: string | null }[]
+  items: { id: string; shipmentItemId: string; receivedQuantity: string; customerUnitPrice: string | null; notes: string | null }[]
 }
 
 export type MarketShipmentDetail = MarketShipment & { receptions: MarketReceipt[] }
@@ -61,6 +76,8 @@ export type StockRow = {
   variety: string | null
   area: string | null
   unit: string
+  productionUnitPrice: string | null
+  customerUnitPrice: string | null
   available: string
 }
 
@@ -68,7 +85,6 @@ export type SaleRow = {
   id: string
   date: string
   updatedAt: string
-  payment: Payment
   quantity: string
   unitPrice: string
   total: string
@@ -77,7 +93,17 @@ export type SaleRow = {
 
 export type PageResult<T> = { rows: T[]; hasNext: boolean }
 
-export type SalesDay = PageResult<SaleRow> & { totals: Record<Payment, string> & { total: string } }
+export type SalesDay = PageResult<SaleRow> & { totals: { total: string; count: number }; from: string; to: string }
+
+export type MarketSalesSummary = {
+  from: string
+  to: string
+  total: string
+  profit: string | null
+  count: number
+  missingCost: number
+  days: { date: string; total: string; count: number }[]
+}
 
 const ecAmount = new Intl.NumberFormat('es-EC', { style: 'currency', currency: 'USD' })
 const ecQuantity = new Intl.NumberFormat('es-EC', { maximumFractionDigits: 2 })

@@ -14,7 +14,7 @@ const cropInclude = {
 type Crop = Prisma.CropGetPayload<{ include: typeof cropInclude }>
 type CatalogName = { name: string; normalizedName: string }
 type AreaDraft = CatalogName & {
-  id?: string; type: 'LOT' | 'ZONE'; surface: number | null; surfaceUnit: string | null; notes: string | null
+  id?: string; type: 'LOT' | 'ZONE'; surface: number | null; surfaceUnit: string | null
 }
 
 function catalogName(value: unknown): CatalogName {
@@ -61,7 +61,6 @@ function areaDrafts(body: Record<string, unknown>): AreaDraft[] | undefined {
     return {
       ...name, id, type, surface,
       surfaceUnit: type === 'LOT' ? cleanName(item.surfaceUnit).slice(0, 24) || 'ha' : null,
-      notes: cleanName(item.notes).slice(0, 2000) || null,
     }
   })
 }
@@ -96,14 +95,37 @@ async function syncAreas(tx: Prisma.TransactionClient, cropId: string, rows: Are
     if (id && !prior) throw new ProductionError('Una de las áreas no pertenece a este cultivo.')
     if (prior?.deletedAt || matching?.deletedAt) throw new ProductionError('Un lote o zona está en la papelera.', 409)
     if (matching && prior?.id !== matching.id) throw new ProductionError('Ya existe un área con ese nombre.', 409)
+    const zone = await tx.zone.upsert({
+      where: { normalizedName: row.normalizedName }, update: {},
+      create: { name: row.name, normalizedName: row.normalizedName },
+    })
     if (prior) {
-      await tx.productionArea.update({ where: { id: prior.id }, data: { ...row, active: true } })
+      await tx.productionArea.update({ where: { id: prior.id }, data: { ...row, zoneId: zone.id, active: true } })
       activeIds.push(prior.id)
     } else {
-      activeIds.push((await tx.productionArea.create({ data: { ...row, cropId } })).id)
+      activeIds.push((await tx.productionArea.create({ data: { ...row, cropId, zoneId: zone.id } })).id)
     }
   }
   await tx.productionArea.updateMany({ where: { cropId, active: true, deletedAt: null, id: { notIn: activeIds } }, data: { active: false } })
+}
+
+async function linkZones(tx: Prisma.TransactionClient, cropId: string, zoneIds: string[], replace: boolean) {
+  const zones = await tx.zone.findMany({ where: { id: { in: zoneIds } } })
+  if (zones.length !== zoneIds.length) throw new ProductionError('Una de las zonas ya no está disponible.')
+  const areaIds: string[] = []
+  for (const { id: zoneId, name, normalizedName } of zones) {
+    const prior = await tx.productionArea.findFirst({
+      where: { cropId, OR: [{ zoneId }, { normalizedName }] },
+    })
+    if (prior?.deletedAt) throw new ProductionError('El vínculo con esta zona está en la papelera.', 409)
+    const area = prior
+      ? await tx.productionArea.update({ where: { id: prior.id }, data: { zoneId, active: true } })
+      : await tx.productionArea.create({ data: { cropId, zoneId, name, normalizedName, type: 'ZONE' } })
+    areaIds.push(area.id)
+  }
+  if (replace) await tx.productionArea.updateMany({
+    where: { cropId, active: true, deletedAt: null, id: { notIn: areaIds } }, data: { active: false },
+  })
 }
 
 async function validateUnit(tx: Prisma.TransactionClient, unitId: string | null) {
@@ -138,6 +160,14 @@ async function save(request: Request, update: boolean) {
     if (update && !id) throw new ProductionError('Indica el cultivo que quieres modificar.')
     const varieties = body.varieties === undefined ? undefined : varietyDrafts(body.varieties)
     const areas = areaDrafts(body)
+    const zoneIds = body.zoneIds === undefined ? undefined : [...new Set(catalogRows(body.zoneIds, 'zonas').map((id) => {
+      if (typeof id !== 'string' || !id) throw new ProductionError('Selecciona una zona válida.')
+      return id
+    }))]
+    if (zoneIds && !zoneIds.length) throw new ProductionError('Vincula al menos una zona al cultivo.')
+    if (!zoneIds && ((!update && !areas?.length) || (areas && !areas.length) || body.hasProductionAreas === false)) {
+      throw new ProductionError('Vincula al menos una zona al cultivo.')
+    }
 
     const result = await prisma.$transaction(async (tx) => {
       const before = update ? await tx.crop.findFirst({ where: { id, deletedAt: null }, include: cropInclude }) : null
@@ -161,12 +191,18 @@ async function save(request: Request, update: boolean) {
           duplicate = null
         }
       }
+      if (!update && duplicate?.active && !duplicate.deletedAt && zoneIds) {
+        if (duplicate.unitId !== unitId) throw new ProductionError('Usa la unidad registrada del cultivo para agregarle nuevas zonas.', 409)
+        await linkZones(tx, duplicate.id, zoneIds, false)
+        const crop = await tx.crop.update({ where: { id: duplicate.id }, data: { hasProductionAreas: true }, include: cropInclude })
+        return { crop, created: false }
+      }
       if (duplicate && duplicate.id !== before?.id && (update || duplicate.active || duplicate.deletedAt)) {
         throw new ProductionError(duplicate.deletedAt ? 'Este cultivo está en la papelera.' : 'Ya existe un cultivo con ese nombre.', 409)
       }
       const existing = before ?? duplicate
       const hasVarieties = typeof body.hasVarieties === 'boolean' ? body.hasVarieties : varieties ? varieties.length > 0 : existing?.hasVarieties ?? false
-      const hasProductionAreas = typeof body.hasProductionAreas === 'boolean' ? body.hasProductionAreas : areas ? areas.length > 0 : existing?.hasProductionAreas ?? false
+      const hasProductionAreas = zoneIds || areas ? true : existing?.hasProductionAreas ?? false
       const data = {
         ...name, unitId, hasVarieties, hasProductionAreas,
         active: before?.active ?? true,
@@ -176,7 +212,8 @@ async function save(request: Request, update: boolean) {
       const saved = existing ? await tx.crop.update({ where: { id: existing.id }, data })
         : await tx.crop.create({ data })
       if (varieties !== undefined || body.hasVarieties === false) await syncVarieties(tx, saved.id, hasVarieties ? varieties ?? [] : [])
-      if (areas !== undefined || body.hasProductionAreas === false) await syncAreas(tx, saved.id, hasProductionAreas ? areas ?? [] : [])
+      if (zoneIds) await linkZones(tx, saved.id, zoneIds, true)
+      else if (areas) await syncAreas(tx, saved.id, areas)
       const crop = await tx.crop.findUniqueOrThrow({ where: { id: saved.id }, include: cropInclude })
       return { crop, created: !existing }
     }, { isolationLevel: 'Serializable' })

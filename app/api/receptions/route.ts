@@ -29,11 +29,11 @@ const receptionLogInclude = {
   where: { deletedAt: null },
   orderBy: [{ receivedAt: 'desc' }, { id: 'desc' }],
   select: {
-    id: true, receiptNumber: true, receivedAt: true, receivedBy: true, notes: true,
+    id: true, receiptNumber: true, receivedAt: true, receivedBy: true, notes: true, closesWithDifferences: true,
     items: {
       where: { deletedAt: null },
       orderBy: { id: 'asc' },
-      select: { id: true, shipmentItemId: true, receivedQuantity: true, notes: true },
+      select: { id: true, shipmentItemId: true, receivedQuantity: true, customerUnitPrice: true, notes: true },
     },
   },
 } satisfies Prisma.ReceptionFindManyArgs
@@ -106,6 +106,7 @@ export async function POST(request: Request) {
     const id = requestId.toLowerCase()
     const distinct = new Set<string>()
     const notes = cleanName(body.notes).slice(0, 2000) || null
+    const closesWithDifferences = body.closesWithDifferences === true
     const items = body.items.map((row: unknown) => {
       if (!isRecord(row) || typeof row.shipmentItemId !== 'string' || !row.shipmentItemId) {
         throw new ProductionError('Indica el identificador de cada producto recibido.')
@@ -115,7 +116,11 @@ export async function POST(request: Request) {
         throw new ProductionError('Cada producto debe aparecer una vez y tener una cantidad positiva de hasta dos decimales.')
       }
       distinct.add(row.shipmentItemId)
-      return { shipmentItemId: row.shipmentItemId, receivedQuantity, notes: cleanName(row.notes).slice(0, 2000) || null }
+      const customerUnitPrice = row.customerUnitPrice == null || row.customerUnitPrice === '' ? null : parsePositiveDecimal(row.customerUnitPrice)
+      if (row.customerUnitPrice != null && row.customerUnitPrice !== '' && customerUnitPrice === null) {
+        throw new ProductionError('Indica un precio al cliente positivo de hasta dos decimales.')
+      }
+      return { shipmentItemId: row.shipmentItemId, receivedQuantity, customerUnitPrice, notes: cleanName(row.notes).slice(0, 2000) || null }
     })
     const actor = await currentActor()
 
@@ -127,10 +132,11 @@ export async function POST(request: Request) {
       const existing = await tx.reception.findUnique({ where: { id }, include: { items: true } })
       if (existing) {
         const matches = !existing.deletedAt && existing.shipmentId === shipmentId &&
-          existing.notes === notes && existing.items.length === items.length &&
+          existing.notes === notes && existing.closesWithDifferences === closesWithDifferences && existing.items.length === items.length &&
           items.every((item) => existing.items.some((saved) => !saved.deletedAt &&
             saved.shipmentItemId === item.shipmentItemId && saved.receivedQuantity.eq(item.receivedQuantity) &&
-            saved.notes === item.notes))
+            saved.notes === item.notes && (item.customerUnitPrice === null
+              ? saved.customerUnitPrice === null : saved.customerUnitPrice?.eq(item.customerUnitPrice))))
         if (!matches) throw new ProductionError('La clave de solicitud ya está asociada a otra recepción.', 409)
         return { created: false, reception: existing, shipment: withReceivedTotals(shipment) }
       }
@@ -151,10 +157,11 @@ export async function POST(request: Request) {
       }
 
       const reception = await tx.reception.create({
-        data: { id, shipmentId, notes, receivedBy: actor, items: { create: items } },
+        data: { id, shipmentId, notes, closesWithDifferences, receivedBy: actor, items: { create: items } },
         include: { items: true },
       })
-      const status = [...pending.values()].every((quantity) => quantity.isZero()) ? 'RECEIVED' : 'PARTIALLY_RECEIVED'
+      const status = [...pending.values()].every((quantity) => quantity.isZero()) ? 'RECEIVED'
+        : closesWithDifferences ? 'RECEIVED_WITH_DIFFERENCES' : 'PARTIALLY_RECEIVED'
       const updated = await tx.shipment.update({
         where: { id: shipmentId }, data: { status }, include: receptionShipmentInclude,
       })

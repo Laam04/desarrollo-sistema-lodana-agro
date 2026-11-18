@@ -57,6 +57,7 @@ model Variety {
 model ProductionArea {
   id             String             @id @default(cuid())
   cropId         String
+  zoneId         String?
   name           String
   normalizedName String
   type           ProductionAreaType
@@ -69,10 +70,19 @@ model ProductionArea {
   deletedAt      DateTime?
 
   crop          Crop           @relation(fields: [cropId], references: [id])
+  zone          Zone?          @relation(fields: [zoneId], references: [id])
   harvests      Harvest[]
   shipmentItems ShipmentItem[]
 
   @@unique([cropId, normalizedName])
+  @@index([zoneId])
+}
+
+model Zone {
+  id             String           @id @default(cuid())
+  name           String
+  normalizedName String           @unique
+  productionAreas ProductionArea[]
 }
 
 model Unit {
@@ -272,6 +282,7 @@ model Reception {
   shipmentId String
   receivedAt DateTime  @default(now())
   receivedBy String?
+  closesWithDifferences Boolean @default(false)
   notes      String?
   createdAt  DateTime  @default(now())
   deletedAt  DateTime?
@@ -287,6 +298,7 @@ model ReceptionItem {
   receptionId      String
   shipmentItemId   String
   receivedQuantity Decimal   @db.Decimal(12, 2)
+  customerUnitPrice Decimal? @db.Decimal(12, 2)
   notes            String?
   deletedAt        DateTime?
 
@@ -310,7 +322,7 @@ model MarketSale {
   quantity         Decimal       @db.Decimal(12, 2)
   unitPrice        Decimal       @db.Decimal(12, 2)
   total            Decimal       @db.Decimal(14, 2)
-  payment          MarketPayment
+  payment          MarketPayment?
   createdBy        String?
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt

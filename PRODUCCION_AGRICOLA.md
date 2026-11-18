@@ -34,13 +34,20 @@ Cuerpo de una recepción:
 
 - Usa `crypto.randomUUID()` una vez al confirmar la recepción y reutiliza el UUID y el mismo cuerpo al reintentar. La respuesta es `201` al crear la recepción y `200` al repetir la solicitud guardada.
 - Envía cada línea recibida una sola vez y usa cantidades positivas de hasta dos decimales, en la unidad original del envío. Omite las líneas sin entrega. Las observaciones son opcionales por recepción y por línea.
-- Un envío pasa de `IN_TRANSIT` a `PARTIALLY_RECEIVED` si queda saldo y a `RECEIVED` cuando se completan sus líneas. La primera recepción cierra la edición y la cancelación en Producción. Para un `409`, recarga el envío y vuelve a validar las cantidades.
+- Registra las cantidades que llegaron físicamente. Si queda saldo, puedes mantenerlo pendiente (`PARTIALLY_RECEIVED`) o cerrar el envío con `closesWithDifferences: true` (`RECEIVED_WITH_DIFFERENCES`). Si se reciben todas las cantidades, el envío pasa a `RECEIVED`. La primera recepción cierra la edición y la cancelación en Producción. Para un `409`, recarga el envío y vuelve a validar las cantidades.
 - Producción reserva el inventario cuando registra el envío. Cada confirmación en Agro Market genera su propio recibo `REC-…`. La cantidad confirmada queda disponible para ventas en la unidad original.
 
-## Registro diario de ventas
+## Registro de ventas
 
-En **Agro Market → Ventas**, selecciona la fecha y el producto de un recibo. Registra la cantidad, el precio unitario y la forma de pago. Puedes registrar varias ventas del mismo producto a precios diferentes. Las ventas de cada línea se acumulan hasta el saldo confirmado en su recibo. Anular una venta devuelve su cantidad al saldo y deja una traza de auditoría.
+En **Agro Market → Ventas**, selecciona la fecha y el producto de un recibo. El buscador filtra los productos con saldo por nombre, número de recibo o código de envío. Ingresa la cantidad y el precio al cliente. Puedes registrar varias ventas del mismo producto a precios diferentes. Anular una venta devuelve su cantidad al saldo del recibo y deja una traza de auditoría.
 
-La hoja diaria conserva el orden de la planilla de referencia. Muestra la fecha, el número de recibo, el proveedor, el producto, la cantidad, la unidad, el precio unitario y el valor total. También conserva la forma de pago para el cierre de efectivo y transferencias. El CSV exporta toda la fecha seleccionada y añade el código del envío para conciliación.
+La hoja conserva las columnas de la planilla de referencia y permite ver o exportar ventas por día o por semana. El resumen de Agro Market muestra el total vendido, las ventas registradas y la ganancia bruta estimada para la semana seleccionada, de lunes a domingo.
 
-Los recibos de este flujo se generan a partir de los envíos de Finca Lodana. El precio estimado de Producción se muestra como referencia en la recepción. El precio que registra el equipo en cada venta determina el importe del cierre diario.
+El precio al cliente que anotes en el recibo se sugiere al vender el producto. El porcentaje de ganancia se calcula sobre el precio de Producción como `(precio al cliente − precio de Producción) ÷ precio de Producción × 100`. La ganancia bruta estimada usa el precio de Producción como costo de referencia y cubre las ventas que tienen ese precio registrado.
+
+## Resumen analítico y Consultas públicas
+
+- **Resumen** agrupa los movimientos mensuales en PostgreSQL. Selecciona el período, el cultivo y la unidad. Los indicadores suman solo las cantidades de la unidad elegida. Las comparaciones porcentuales requieren cobertura mensual equivalente y períodos cerrados.
+- La producción útil descuenta las mermas aplicables de cada cosecha de origen. El gráfico de mermas usa la fecha de registro de la pérdida. Los despachos, las recepciones y las ventas se agrupan por su propia fecha. Las recepciones usan la hora de Ecuador.
+- La estacionalidad exige al menos dos años calendario completos y consistencia entre años. Para la previsión se requieren 24 meses cerrados consecutivos con registros por cultivo y unidad. El modelo pondera los mismos meses de los dos años anteriores y ajusta por la mediana de sus doce variaciones interanuales. Los rangos usan errores retrospectivos del mismo horizonte cuando hay al menos seis observaciones para estimarlos. El registro mensual permite evaluar continuidad y deja abierta la cobertura real de cada mes.
+- **Consultas** se abre desde inicio sin PIN. `/api/public-analytics` publica meses cerrados y excluye celdas con menos de tres registros por indicador, cultivo y unidad. También reserva la producción útil cuando su diferencia con la cosechada revelaría una merma poco frecuente. Las comparaciones y previsiones públicas usan los valores publicados. Los motivos de pérdida detallados se consultan desde el Resumen interno.

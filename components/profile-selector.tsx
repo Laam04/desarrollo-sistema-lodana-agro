@@ -1,15 +1,16 @@
 'use client'
 
+import Link from 'next/link'
 import { useEffect, useRef, useState } from 'react'
 import { Leaf, PackageCheck, Search, Settings, ArrowRight, X, ShieldCheck } from 'lucide-react'
 import { productionFetch } from '@/lib/production-client'
 
-type Profile = 'production' | 'reception' | 'queries' | 'admin'
+type Profile = 'production' | 'reception' | 'admin'
 
 const profiles = [
   { id: 'production' as const, title: 'Producción agrícola', description: 'Registra y consulta cosechas, lotes, mermas y costos de producción.', icon: Leaf, color: 'green' },
   { id: 'reception' as const, title: 'Agro Market', description: 'Gestiona la entrada de productos y movimientos de Agro Market.', icon: PackageCheck, color: 'amber' },
-  { id: 'queries' as const, title: 'Consultas', description: 'Consulta información operativa de Lodana y Agro Market.', icon: Search, color: 'blue' },
+  { id: 'queries' as const, title: 'Consultas', description: 'Explora estadísticas públicas de producción y Agro Market.', icon: Search, color: 'blue' },
 ]
 
 export function ProfileSelector() {
@@ -42,7 +43,7 @@ export function ProfileSelector() {
     setError('')
     try {
       await productionFetch('/api/profile-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile: selected, pin }) })
-      window.location.assign(selected === 'admin' ? '/administracion' : selected === 'production' ? '/lodana' : selected === 'reception' ? '/agro-market' : '/consultas')
+      window.location.assign(selected === 'admin' ? '/administracion' : selected === 'production' ? '/lodana' : '/agro-market')
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : 'No se pudo iniciar sesión.')
       setLoading(false)
@@ -57,7 +58,7 @@ export function ProfileSelector() {
           <button aria-label="Administración" onClick={() => openPin('admin')} className="rounded-xl p-2.5 text-muted-foreground transition hover:bg-white hover:text-[#2c6048] dark:hover:bg-[#1b2920]"><Settings /></button>
         </header>
         <section className="flex flex-1 flex-col justify-center py-12"><div className="mx-auto max-w-2xl text-center"><p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#2c6048]">Bienvenido</p><h1 className="mt-3 text-3xl font-semibold tracking-[-0.04em] sm:text-5xl">Selecciona un espacio de trabajo</h1><p className="mx-auto mt-4 max-w-xl text-sm leading-6 text-muted-foreground sm:text-base">Elige el área a la que deseas ingresar para comenzar a trabajar con la información de tu operación agrícola.</p></div>
-          <div className="mt-10 grid gap-4 md:grid-cols-3">{profiles.map(({ id, title, description, icon: Icon, color }) => <article key={id} className="group rounded-3xl border border-[#dfe8df] bg-white/90 p-6 shadow-[0_10px_30px_rgba(35,78,52,0.05)] transition hover:-translate-y-1 hover:border-[#b7d3bc] hover:shadow-[0_18px_40px_rgba(35,78,52,0.1)] dark:border-[#293b30] dark:bg-[#18221c]"><div className={`flex size-12 items-center justify-center rounded-2xl ${color === 'green' ? 'bg-[#e2f0e5] text-[#2c6048]' : color === 'amber' ? 'bg-[#f7eddf] text-[#a66c27]' : 'bg-[#e5edf5] text-[#50749a]'}`}><Icon /></div><h2 className="mt-6 text-lg font-semibold">{title}</h2><p className="mt-2 min-h-12 text-sm leading-6 text-muted-foreground">{description}</p><button onClick={() => openPin(id)} className="mt-6 inline-flex items-center gap-2 rounded-xl bg-[#2c6048] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[#234d39]">Ingresar <ArrowRight className="size-4" /></button></article>)}</div>
+          <div className="mt-10 grid gap-4 md:grid-cols-3">{profiles.map(({ id, title, description, icon: Icon, color }) => <article key={id} className="group rounded-3xl border border-[#dfe8df] bg-white/90 p-6 shadow-[0_10px_30px_rgba(35,78,52,0.05)] transition hover:-translate-y-1 hover:border-[#b7d3bc] hover:shadow-[0_18px_40px_rgba(35,78,52,0.1)] dark:border-[#293b30] dark:bg-[#18221c]"><div className={`flex size-12 items-center justify-center rounded-2xl ${color === 'green' ? 'bg-[#e2f0e5] text-[#2c6048]' : color === 'amber' ? 'bg-[#f7eddf] text-[#a66c27]' : 'bg-[#e5edf5] text-[#50749a]'}`}><Icon /></div><h2 className="mt-6 text-lg font-semibold">{title}</h2><p className="mt-2 min-h-12 text-sm leading-6 text-muted-foreground">{description}</p>{id === 'queries' ? <Link href="/consultas" className="mt-6 inline-flex items-center gap-2 rounded-xl bg-[#2c6048] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[#234d39]">Ver estadísticas <ArrowRight className="size-4" /></Link> : <button onClick={() => openPin(id)} className="mt-6 inline-flex items-center gap-2 rounded-xl bg-[#2c6048] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[#234d39]">Ingresar <ArrowRight className="size-4" /></button>}</article>)}</div>
         </section>
         <footer className="text-center text-xs text-muted-foreground">Lodana Agro · Acceso por perfiles</footer>
       </div>
