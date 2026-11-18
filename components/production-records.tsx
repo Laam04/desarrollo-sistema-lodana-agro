@@ -1,8 +1,7 @@
+"use client";
 
-'use client'
-
-import useSWR from 'swr'
-import { useMemo, useState, type FormEvent } from 'react'
+import useSWR from "swr";
+import { useMemo, useState, type FormEvent } from "react";
 import {
   CheckCircle2,
   Loader2,
@@ -11,227 +10,299 @@ import {
   Trash2,
   TriangleAlert,
   X,
-} from 'lucide-react'
+} from "lucide-react";
 
 type Crop = {
-  id: string
-  name: string
-  unit?: { id: string; name: string } | null
-  varieties?: { id: string; name: string }[]
+  id: string;
+  name: string;
+  unit?: { id: string; name: string } | null;
+  varieties?: { id: string; name: string }[];
   productionAreas?: {
-    id: string
-    name: string
-    type: 'LOT' | 'ZONE'
-  }[]
-}
+    id: string;
+    name: string;
+    type: "LOT" | "ZONE";
+  }[];
+};
 
-type Unit = { id: string; name: string }
+type Unit = { id: string; name: string };
 
 type ShipmentLine = {
-  cropId: string
-  varietyId: string
-  productionAreaId: string
-  unitId: string
-  quantity: string
-  unitPrice: string
-  notes: string
-}
+  cropId: string;
+  varietyId: string;
+  productionAreaId: string;
+  unitId: string;
+  quantity: string;
+  unitPrice: string;
+  notes: string;
+};
 
 type Message = {
-  kind: 'success' | 'error'
-  text: string
-}
+  kind: "success" | "error";
+  text: string;
+};
 
 const fetcher = async (url: string) => {
-  const response = await fetch(url)
-  const data = await response.json()
+  const response = await fetch(url);
+  const data = await response.json();
 
   if (!response.ok) {
-    throw new Error(data.error || 'No se pudieron cargar los datos.')
+    throw new Error(data.error || "No se pudieron cargar los datos.");
   }
 
-  return data
-}
+  return data;
+};
 
 function today() {
-  const date = new Date()
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
+  const date = new Date();
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function emptyShipmentLine(): ShipmentLine {
   return {
-    cropId: '',
-    varietyId: '',
-    productionAreaId: '',
-    unitId: '',
-    quantity: '',
-    unitPrice: '',
-    notes: '',
-  }
+    cropId: "",
+    varietyId: "",
+    productionAreaId: "",
+    unitId: "",
+    quantity: "",
+    unitPrice: "",
+    notes: "",
+  };
 }
 
 function formatDate(value?: string) {
-  if (!value) return '—'
-  return new Date(value).toLocaleDateString('es-EC')
+  if (!value) return "—";
+  return new Date(value).toLocaleDateString("es-EC");
 }
 
 function formatAmount(value: unknown) {
-  const amount = Number(value || 0)
-  return `$${amount.toFixed(2)}`
+  const amount = Number(value || 0);
+  return `$${amount.toFixed(2)}`;
 }
 
 export function ProductionRecords({ active }: { active: string }) {
-  const isHarvests = active === 'cosechas'
-  const isShipments = active === 'envios'
-  const isCosts = active === 'costos'
+  const isHarvests = active === "cosechas";
+  const isShipments = active === "envios";
+  const isCosts = active === "costos";
 
-  const [harvestView, setHarvestView] = useState<'cosechas' | 'mermas'>(
-    'cosechas'
-  )
-  const isLosses = isHarvests && harvestView === 'mermas'
+  const [harvestView, setHarvestView] = useState<"cosechas" | "mermas">(
+    "cosechas",
+  );
+  const isLosses = isHarvests && harvestView === "mermas";
 
-  const { data: crops = [] } = useSWR<Crop[]>('/api/crops', fetcher)
-  const { data: units = [] } = useSWR<Unit[]>('/api/units', fetcher)
+  const [shipmentDate, setShipmentDate] = useState(today());
+
+  const { data: crops = [] } = useSWR<Crop[]>("/api/crops", fetcher);
+  const { data: units = [] } = useSWR<Unit[]>("/api/units", fetcher);
   const { data: harvestOptions = [] } = useSWR<any[]>(
-  isLosses ? '/api/harvests' : null,
-  fetcher
-)
+    isLosses ? "/api/harvests" : null,
+    fetcher,
+  );
+  const { data: shipmentAvailability = [] } = useSWR<any[]>(
+    isShipments && shipmentDate
+      ? `/api/shipments/availability?date=${shipmentDate}`
+      : null,
+    fetcher,
+  );
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [filterCropId, setFilterCropId] = useState("");
+  const [search, setSearch] = useState("");
 
-  const [from, setFrom] = useState('')
-  const [to, setTo] = useState('')
-  const [filterCropId, setFilterCropId] = useState('')
-  const [search, setSearch] = useState('')
-
-  const [cropId, setCropId] = useState('')
-  const selectedCrop = crops.find((crop) => crop.id === cropId)
-  const [unitId, setUnitId] = useState('')
+  const [cropId, setCropId] = useState("");
+  const selectedCrop = crops.find((crop) => crop.id === cropId);
+  const [unitId, setUnitId] = useState("");
 
   const [shipmentLines, setShipmentLines] = useState<ShipmentLine[]>([
     emptyShipmentLine(),
-  ])
+  ]);
 
-  const [message, setMessage] = useState<Message | null>(null)
-  const [saving, setSaving] = useState(false)
+  const [message, setMessage] = useState<Message | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [lossToDelete, setLossToDelete] = useState<any | null>(null);
+  const [deletingLoss, setDeletingLoss] = useState(false);
 
   const endpoint = isHarvests
-  ? isLosses
-    ? '/api/losses'
-    : `/api/harvests?${new URLSearchParams({
+    ? isLosses
+      ? "/api/losses"
+      : `/api/harvests?${new URLSearchParams({
         ...(from ? { from } : {}),
         ...(to ? { to } : {}),
         ...(filterCropId ? { cropId: filterCropId } : {}),
       }).toString()}`
-  : isShipments
-    ? '/api/shipments'
-    : isCosts
-      ? '/api/costs'
-      : null
+    : isShipments
+      ? "/api/shipments"
+      : isCosts
+        ? "/api/costs"
+        : null;
 
   const {
     data: rows = [],
     error: loadError,
     mutate,
-  } = useSWR<any[]>(endpoint, fetcher)
+  } = useSWR<any[]>(endpoint, fetcher);
 
   const visibleRows = useMemo(() => {
     return rows.filter((row) => {
       const textMatches = JSON.stringify(row)
         .toLocaleLowerCase()
-        .includes(search.toLocaleLowerCase())
+        .includes(search.toLocaleLowerCase());
 
-      if (!textMatches) return false
+      if (!textMatches) return false;
 
-      // Los filtros de fecha también se aplican localmente en envíos y costos.
-      if (!isHarvests && from) {
+      // Filtro por fecha
+      if ((!isHarvests || isLosses) && from) {
         if (!row.date || new Date(row.date) < new Date(`${from}T00:00:00`)) {
-          return false
+          return false;
         }
       }
 
-      if (!isHarvests && to) {
-        if (
-          !row.date ||
-          new Date(row.date) > new Date(`${to}T23:59:59.999`)
-        ) {
-          return false
+      if ((!isHarvests || isLosses) && to) {
+        if (!row.date || new Date(row.date) > new Date(`${to}T23:59:59.999`)) {
+          return false;
         }
       }
 
-      return true
-    })
-  }, [rows, search, from, to, isHarvests])
+      // Filtro por cultivo en mermas
+      if (isLosses && filterCropId) {
+        if (row.harvest?.cropId !== filterCropId) {
+          return false;
+        }
+      }
 
-  function updateShipmentLine(
-    index: number,
-    changes: Partial<ShipmentLine>
-  ) {
+      return true;
+    });
+  }, [rows, search, from, to, isHarvests, isLosses, filterCropId]);
+  async function deleteLoss() {
+    if (!lossToDelete) return;
+
+    setDeletingLoss(true);
+
+    try {
+      const response = await fetch('/api/losses', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: lossToDelete.id }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'No se pudo eliminar la merma.');
+      }
+
+      await mutate();
+      setLossToDelete(null);
+      setMessage({
+        kind: 'success',
+        text: 'Merma enviada a la papelera correctamente.',
+      });
+    } catch (error) {
+      setMessage({
+        kind: 'error',
+        text: error instanceof Error
+          ? error.message
+          : 'No se pudo eliminar la merma.',
+      });
+    } finally {
+      setDeletingLoss(false);
+    }
+  }
+  function updateShipmentLine(index: number, changes: Partial<ShipmentLine>) {
     setShipmentLines((current) =>
       current.map((line, lineIndex) =>
-        lineIndex === index ? { ...line, ...changes } : line
-      )
-    )
+        lineIndex === index ? { ...line, ...changes } : line,
+      ),
+    );
   }
 
   function addShipmentLine() {
-    setShipmentLines((current) => [...current, emptyShipmentLine()])
+    setShipmentLines((current) => [...current, emptyShipmentLine()]);
   }
+  function prepareAllAvailableHarvests() {
+    const availableLines: ShipmentLine[] = shipmentAvailability
+      .filter((item) => Number(item.available) > 0)
+      .map((item) => ({
+        cropId: item.cropId,
+        varietyId: item.varietyId ?? "",
+        productionAreaId: item.productionAreaId ?? "",
+        unitId: item.unitId,
+        quantity: String(item.available),
+        unitPrice: "",
+        notes: "",
+      }));
 
+    if (availableLines.length === 0) {
+      setMessage({
+        kind: "error",
+        text: "No hay cosechas con existencias disponibles para esta fecha.",
+      });
+      return;
+    }
+
+    setShipmentLines(availableLines);
+    setMessage(null);
+  }
   function removeShipmentLine(index: number) {
     setShipmentLines((current) =>
       current.length === 1
         ? current
-        : current.filter((_, lineIndex) => lineIndex !== index)
-    )
+        : current.filter((_, lineIndex) => lineIndex !== index),
+    );
   }
 
   async function submitHarvest(form: HTMLFormElement) {
-    const formData = new FormData(form)
+    const formData = new FormData(form);
     const payload: Record<string, unknown> = Object.fromEntries(
-      formData.entries()
-    )
+      formData.entries(),
+    );
 
-    payload.cropId = cropId
-    payload.unitId = unitId || selectedCrop?.unit?.id
+    payload.cropId = cropId;
+    payload.unitId = unitId || selectedCrop?.unit?.id;
 
-    return fetch('/api/harvests', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    return fetch("/api/harvests", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-    })
+    });
   }
-async function submitLoss(form: HTMLFormElement) {
-  const formData = new FormData(form)
+  async function submitLoss(form: HTMLFormElement) {
+    const formData = new FormData(form);
+    const affectsHarvestValue = formData.get("affectsHarvest");
 
-  const payload = {
-    date: formData.get('date'),
-    harvestId: formData.get('harvestId'),
-    quantity: formData.get('quantity'),
-    reason: formData.get('reason'),
-    notes: formData.get('notes'),
+    const payload = {
+      date: formData.get("date"),
+      harvestId: formData.get("harvestId"),
+      quantity: formData.get("quantity"),
+      reason: formData.get("reason"),
+      notes: formData.get("notes"),
+      affectsHarvest:
+        affectsHarvestValue === null
+          ? null
+          : affectsHarvestValue === "true",
+    };
+
+    return fetch("/api/losses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
   }
-
-  return fetch('/api/losses', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
-}
   async function submitCost(form: HTMLFormElement) {
-    const formData = new FormData(form)
-    const payload = Object.fromEntries(formData.entries())
+    const formData = new FormData(form);
+    const payload = Object.fromEntries(formData.entries());
 
-    return fetch('/api/costs', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    return fetch("/api/costs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-    })
+    });
   }
 
   async function submitShipment(form: HTMLFormElement) {
-    const formData = new FormData(form)
+    const formData = new FormData(form);
 
     const items = shipmentLines.map((line) => ({
       cropId: line.cropId,
@@ -241,126 +312,144 @@ async function submitLoss(form: HTMLFormElement) {
       quantity: line.quantity,
       unitPrice: line.unitPrice,
       notes: line.notes,
-    }))
+    }));
 
-    return fetch('/api/shipments', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    return fetch("/api/shipments", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        date: formData.get('date'),
-        notes: formData.get('notes'),
+        date: formData.get("date"),
+        notes: formData.get("notes"),
         items,
       }),
-    })
+    });
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
+    event.preventDefault();
 
-    const form = event.currentTarget
-    setSaving(true)
-    setMessage(null)
+    const form = event.currentTarget;
+    setSaving(true);
+    setMessage(null);
 
     try {
-      let response: Response
+      let response: Response;
 
       if (isLosses) {
-  response = await submitLoss(form)
-} else if (isHarvests) {
-  response = await submitHarvest(form)
-} else if (isShipments) {
-        response = await submitShipment(form)
+        response = await submitLoss(form);
+      } else if (isHarvests) {
+        response = await submitHarvest(form);
+      } else if (isShipments) {
+        response = await submitShipment(form);
       } else {
-        response = await submitCost(form)
+        response = await submitCost(form);
       }
 
-      const data = await response.json()
+      const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || 'No se pudo guardar el registro.')
+        throw new Error(data.error || "No se pudo guardar el registro.");
       }
 
       setMessage({
-        kind: 'success',
-        text: isHarvests
-          ? 'Cosecha registrada correctamente.'
-          : isShipments
-            ? `Envío ${data.code || ''} registrado correctamente.`
-            : 'Costo registrado correctamente.',
-      })
+        kind: "success",
+        text: isLosses
+          ? "Merma registrada correctamente."
+          : isHarvests
+            ? "Cosecha registrada correctamente."
+            : isShipments
+              ? `Envío ${data.code || ""} registrado correctamente.`
+              : "Costo registrado correctamente.",
+      });
 
-      form.reset()
-      setCropId('')
-      setUnitId('')
-      setShipmentLines([emptyShipmentLine()])
+      form.reset();
+      setCropId("");
+      setUnitId("");
+      setShipmentLines([emptyShipmentLine()]);
 
-      await mutate()
+      await mutate();
     } catch (error) {
       setMessage({
-        kind: 'error',
+        kind: "error",
         text:
           error instanceof Error
             ? error.message
-            : 'Ocurrió un error al guardar el registro.',
-      })
+            : "Ocurrió un error al guardar el registro.",
+      });
     } finally {
-      setSaving(false)
+      setSaving(false);
     }
   }
 
   const totalShipment = shipmentLines.reduce(
     (total, line) =>
       total + Number(line.quantity || 0) * Number(line.unitPrice || 0),
-    0
-  )
+    0,
+  );
+  const hasShipmentAvailabilityError = shipmentLines.some((line) => {
+    if (!line.cropId || !line.quantity) return false;
 
+    const crop = crops.find((item) => item.id === line.cropId);
+    const available = shipmentAvailability.find(
+      (item) =>
+        item.cropId === line.cropId &&
+        item.varietyId === (line.varietyId || null) &&
+        item.productionAreaId === (line.productionAreaId || null) &&
+        item.unitId === (line.unitId || crop?.unit?.id || ""),
+    );
+
+    return (
+      !available ||
+      Number(line.quantity) > available.available
+    );
+  });
   return (
     <div className="mt-7 grid items-start gap-5 xl:grid-cols-[minmax(340px,0.85fr)_minmax(0,1.15fr)]">
-          {isHarvests && (
-      <div className="flex gap-2 rounded-xl border border-[#e1e9e1] bg-white/80 p-2 dark:border-[#2d3b32] dark:bg-[#18211c] xl:col-span-2">
-        <button
-          type="button"
-          onClick={() => setHarvestView('cosechas')}
-          className={`flex-1 rounded-lg px-4 py-2.5 text-sm font-semibold transition ${
-            harvestView === 'cosechas'
-              ? 'bg-[#2c6048] text-white'
-              : 'text-muted-foreground hover:bg-muted'
-          }`}
-        >
-          Cosechas
-        </button>
+      {isHarvests && (
+        <div className="flex gap-2 rounded-xl border border-[#e1e9e1] bg-white/80 p-2 dark:border-[#2d3b32] dark:bg-[#18211c] xl:col-span-2">
+          <button
+            type="button"
+            onClick={() => setHarvestView("cosechas")}
+            className={`flex-1 rounded-lg px-4 py-2.5 text-sm font-semibold transition ${harvestView === "cosechas"
+              ? "bg-[#2c6048] text-white"
+              : "text-muted-foreground hover:bg-muted"
+              }`}
+          >
+            Cosechas
+          </button>
 
-        <button
-          type="button"
-          onClick={() => setHarvestView('mermas')}
-          className={`flex-1 rounded-lg px-4 py-2.5 text-sm font-semibold transition ${
-            harvestView === 'mermas'
-              ? 'bg-[#2c6048] text-white'
-              : 'text-muted-foreground hover:bg-muted'
-          }`}
-        >
-          Mermas
-        </button>
-      </div>
-    )}
+          <button
+            type="button"
+            onClick={() => setHarvestView("mermas")}
+            className={`flex-1 rounded-lg px-4 py-2.5 text-sm font-semibold transition ${harvestView === "mermas"
+              ? "bg-[#2c6048] text-white"
+              : "text-muted-foreground hover:bg-muted"
+              }`}
+          >
+            Mermas
+          </button>
+        </div>
+      )}
       <form
         onSubmit={submit}
         className="rounded-2xl border border-[#e1e9e1] bg-white/80 p-5 dark:border-[#2d3b32] dark:bg-[#18211c]"
       >
         <p className="text-xs font-semibold uppercase tracking-[0.15em] text-[#2c6048] dark:text-[#a8d5b3]">
-          {isHarvests
-            ? 'Registro de producción'
-            : isShipments
-              ? 'Salida de productos'
-              : 'Registro de gastos'}
+          {isLosses
+            ? "Registro de mermas"
+            : isHarvests
+              ? "Registro de producción"
+              : isShipments}
         </p>
 
         <h3 className="mt-1 text-xl font-semibold">
-          {isHarvests
-            ? 'Registrar cosecha'
-            : isShipments
-              ? 'Preparar envío'
-              : 'Registrar costo'}
+          {isLosses
+            ? "Registrar merma"
+            : isHarvests
+              ? "Registrar cosecha"
+              : isShipments
+                ? "Preparar envío"
+                : "Registrar costo"}
         </h3>
 
         <div className="mt-5 grid gap-4">
@@ -370,7 +459,13 @@ async function submitLoss(form: HTMLFormElement) {
               required
               type="date"
               name="date"
-              defaultValue={today()}
+              value={isShipments ? shipmentDate : undefined}
+              defaultValue={!isShipments ? today() : undefined}
+              onChange={
+                isShipments
+                  ? (event) => setShipmentDate(event.target.value)
+                  : undefined
+              }
               className="rounded-xl border border-border bg-background px-3 py-2.5 text-sm"
             />
           </label>
@@ -387,8 +482,9 @@ async function submitLoss(form: HTMLFormElement) {
                   <option value="">Seleccionar cosecha</option>
                   {harvestOptions.map((harvest) => (
                     <option key={harvest.id} value={harvest.id}>
-                      {harvest.crop?.name || 'Cultivo'} — {formatDate(harvest.date)} — {harvest.quantity}{' '}
-                      {harvest.unit?.name || ''}
+                      {harvest.crop?.name || "Cultivo"} —{" "}
+                      {formatDate(harvest.date)} — {harvest.quantity}{" "}
+                      {harvest.unit?.name || ""}
                     </option>
                   ))}
                 </select>
@@ -405,6 +501,43 @@ async function submitLoss(form: HTMLFormElement) {
                   className="rounded-xl border border-border bg-background px-3 py-2.5 text-sm"
                 />
               </label>
+              <fieldset className="grid gap-2 rounded-xl border border-border p-3">
+                <legend className="px-1 text-sm font-medium">
+                  ¿La merma afecta a la producción útil?
+                </legend>
+
+                <label className="flex items-start gap-2 text-sm font-normal">
+                  <input
+                    required
+                    type="radio"
+                    name="affectsHarvest"
+                    value="true"
+                    className="mt-1"
+                  />
+                  <span>
+                    <span className="font-medium">Sí, afecta.</span>
+                    <span className="block text-muted-foreground">
+                      Se descontará de la producción útil disponible.
+                    </span>
+                  </span>
+                </label>
+
+                <label className="flex items-start gap-2 text-sm font-normal">
+                  <input
+                    required
+                    type="radio"
+                    name="affectsHarvest"
+                    value="false"
+                    className="mt-1"
+                  />
+                  <span>
+                    <span className="font-medium">No afecta.</span>
+                    <span className="block text-muted-foreground">
+                      Se registrará como pérdida, sin descontarla de la producción útil.
+                    </span>
+                  </span>
+                </label>
+              </fieldset>
 
               <label className="grid gap-1.5 text-sm font-medium">
                 Motivo
@@ -435,8 +568,8 @@ async function submitLoss(form: HTMLFormElement) {
                   required
                   value={cropId}
                   onChange={(event) => {
-                    setCropId(event.target.value)
-                    setUnitId('')
+                    setCropId(event.target.value);
+                    setUnitId("");
                   }}
                   className="rounded-xl border border-border bg-background px-3 py-2.5 text-sm"
                 >
@@ -499,7 +632,7 @@ async function submitLoss(form: HTMLFormElement) {
                 Unidad
                 <select
                   required
-                  value={unitId || selectedCrop?.unit?.id || ''}
+                  value={unitId || selectedCrop?.unit?.id || ""}
                   onChange={(event) => setUnitId(event.target.value)}
                   name="unitId"
                   className="rounded-xl border border-border bg-background px-3 py-2.5 text-sm"
@@ -611,16 +744,32 @@ async function submitLoss(form: HTMLFormElement) {
                   onClick={addShipmentLine}
                   className="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-2 text-xs font-semibold hover:bg-muted"
                 >
+                  <button
+                    type="button"
+                    onClick={prepareAllAvailableHarvests}
+                    disabled={shipmentAvailability.length === 0}
+                    className="inline-flex items-center gap-1 rounded-lg bg-[#2c6048] px-3 py-2 text-xs font-semibold text-white hover:bg-[#24523b] disabled:opacity-50"
+                  >
+                    <Plus className="size-4" />
+                    Preparar todas las cosechas
+                  </button>
                   <Plus className="size-4" />
                   Agregar producto
                 </button>
               </div>
 
               {shipmentLines.map((line, index) => {
-                const crop = crops.find(
-                  (item) => item.id === line.cropId
-                )
-
+                const crop = crops.find((item) => item.id === line.cropId);
+                const selectedAvailability = shipmentAvailability.find(
+                  (item) =>
+                    item.cropId === line.cropId &&
+                    item.varietyId === (line.varietyId || null) &&
+                    item.productionAreaId === (line.productionAreaId || null) &&
+                    item.unitId === (line.unitId || crop?.unit?.id || ""),
+                );
+                const exceedsAvailability =
+                  selectedAvailability !== undefined &&
+                  Number(line.quantity || 0) > selectedAvailability.available;
                 return (
                   <div
                     key={index}
@@ -651,15 +800,15 @@ async function submitLoss(form: HTMLFormElement) {
                           value={line.cropId}
                           onChange={(event) => {
                             const nextCrop = crops.find(
-                              (item) => item.id === event.target.value
-                            )
+                              (item) => item.id === event.target.value,
+                            );
 
                             updateShipmentLine(index, {
                               cropId: event.target.value,
-                              varietyId: '',
-                              productionAreaId: '',
-                              unitId: nextCrop?.unit?.id || '',
-                            })
+                              varietyId: "",
+                              productionAreaId: "",
+                              unitId: nextCrop?.unit?.id || "",
+                            });
                           }}
                           className="rounded-xl border border-border bg-background px-3 py-2.5 text-sm"
                         >
@@ -720,7 +869,7 @@ async function submitLoss(form: HTMLFormElement) {
                         Unidad
                         <select
                           required
-                          value={line.unitId || crop?.unit?.id || ''}
+                          value={line.unitId || crop?.unit?.id || ""}
                           onChange={(event) =>
                             updateShipmentLine(index, {
                               unitId: event.target.value,
@@ -736,7 +885,20 @@ async function submitLoss(form: HTMLFormElement) {
                           ))}
                         </select>
                       </label>
-
+                      {line.cropId && (
+                        <div className="rounded-lg border border-border bg-muted/40 px-3 py-2">
+                          <p className="text-xs text-muted-foreground">
+                            Existencias disponibles
+                          </p>
+                          <p className="text-sm font-semibold">
+                            {selectedAvailability
+                              ? `${selectedAvailability.available.toFixed(2)} ${selectedAvailability.unitName}`
+                              : shipmentAvailability.length === 0
+                                ? "Cargando existencias..."
+                                : "Sin existencias para esta combinación"}
+                          </p>
+                        </div>
+                      )}
                       <div className="grid grid-cols-2 gap-3">
                         <label className="grid gap-1.5 text-sm font-medium">
                           Cantidad
@@ -753,6 +915,13 @@ async function submitLoss(form: HTMLFormElement) {
                             }
                             className="min-w-0 rounded-xl border border-border bg-background px-3 py-2.5 text-sm"
                           />
+                          {exceedsAvailability && (
+                            <span className="text-xs font-medium text-red-600">
+                              La cantidad supera las existencias disponibles (
+                              {selectedAvailability.available.toFixed(2)}{" "}
+                              {selectedAvailability.unitName}).
+                            </span>
+                          )}
                         </label>
 
                         <label className="grid gap-1.5 text-sm font-medium">
@@ -774,11 +943,11 @@ async function submitLoss(form: HTMLFormElement) {
                       </div>
 
                       <p className="text-right text-xs text-muted-foreground">
-                        Subtotal:{' '}
+                        Subtotal:{" "}
                         <strong>
                           {formatAmount(
                             Number(line.quantity || 0) *
-                              Number(line.unitPrice || 0)
+                            Number(line.unitPrice || 0),
                           )}
                         </strong>
                       </p>
@@ -797,7 +966,7 @@ async function submitLoss(form: HTMLFormElement) {
                       </label>
                     </div>
                   </div>
-                )
+                );
               })}
 
               <div className="rounded-xl bg-[#eef5ef] p-4 dark:bg-[#1c3327]">
@@ -823,13 +992,12 @@ async function submitLoss(form: HTMLFormElement) {
 
         {message && (
           <p
-            className={`mt-4 flex items-center gap-2 rounded-xl px-3 py-2 text-sm ${
-              message.kind === 'success'
-                ? 'bg-[#eef5ef] text-[#24523b]'
-                : 'bg-red-50 text-red-700 dark:bg-red-950/30 dark:text-red-300'
-            }`}
+            className={`mt-4 flex items-center gap-2 rounded-xl px-3 py-2 text-sm ${message.kind === "success"
+              ? "bg-[#eef5ef] text-[#24523b]"
+              : "bg-red-50 text-red-700 dark:bg-red-950/30 dark:text-red-300"
+              }`}
           >
-            {message.kind === 'success' ? (
+            {message.kind === "success" ? (
               <CheckCircle2 className="size-4 shrink-0" />
             ) : (
               <TriangleAlert className="size-4 shrink-0" />
@@ -839,17 +1007,19 @@ async function submitLoss(form: HTMLFormElement) {
         )}
 
         <button
-          disabled={saving}
+          disabled={saving || (isShipments && hasShipmentAvailabilityError)}
           className="mt-5 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#2c6048] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#234d39] disabled:opacity-60"
         >
           {saving && <Loader2 className="size-4 animate-spin" />}
           {saving
-            ? 'Guardando…'
-            : isHarvests
-              ? 'Guardar cosecha'
-              : isShipments
-                ? 'Confirmar envío'
-                : 'Guardar costo'}
+            ? "Guardando…"
+            : isLosses
+              ? "Registrar merma"
+              : isHarvests
+                ? "Guardar cosecha"
+                : isShipments
+                  ? "Enviar cosechas seleccionadas"
+                  : "Guardar costo"}
         </button>
       </form>
 
@@ -860,11 +1030,13 @@ async function submitLoss(form: HTMLFormElement) {
               Historial
             </p>
             <h3 className="mt-1 text-xl font-semibold">
-              {isHarvests
-                ? 'Cosechas registradas'
-                : isShipments
-                  ? 'Envíos registrados'
-                  : 'Costos registrados'}
+              {isLosses
+                ? "Mermas registradas"
+                : isHarvests
+                  ? "Cosechas registradas"
+                  : isShipments
+                    ? "Envíos registrados"
+                    : "Costos registrados"}
             </h3>
           </div>
 
@@ -933,9 +1105,8 @@ async function submitLoss(form: HTMLFormElement) {
               <HistoryCard
                 key={row.id}
                 row={row}
-                active={active}
-              />
-            ))
+                active={isLosses ? 'mermas' : active}
+              />))
           ) : (
             <div className="flex min-h-56 items-center justify-center rounded-xl border border-dashed border-border px-5 text-center text-sm text-muted-foreground">
               No hay registros que coincidan con los filtros.
@@ -944,31 +1115,107 @@ async function submitLoss(form: HTMLFormElement) {
         </div>
       </section>
     </div>
-  )
+  );
 }
 
 function HistoryCard({
   row,
   active,
+  onDelete,
 }: {
-  row: any
-  active: string
+  row: any;
+  active: string;
+  onDelete?: () => void;
 }) {
-  if (active === 'cosechas') {
-    const losses = row.losses || []
-    const lossTotal = losses.reduce(
-      (sum: number, loss: any) => sum + Number(loss.quantity || 0),
-      0
-    )
-const available = Math.max(0, Number(row.quantity || 0) - lossTotal)
+  if (active === 'mermas') {
+    const harvest = row.harvest
+
     return (
       <article className="rounded-xl border border-border/70 p-4 text-sm">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div>
-            <p className="font-semibold">{row.crop?.name || 'Cultivo'}</p>
+            <p className="font-semibold">
+              {harvest?.crop?.name || 'Cultivo'}
+            </p>
             <p className="mt-1 text-xs text-muted-foreground">
-              {row.variety?.name ? `${row.variety.name} · ` : ''}
-              {row.productionArea?.name || 'Sin lote o zona'}
+              {harvest?.variety?.name
+                ? `${harvest.variety.name} · `
+                : ''}
+              {harvest?.productionArea?.name || 'Sin lote o zona'}
+            </p>
+          </div>
+
+          <span className="text-xs text-muted-foreground">
+            {formatDate(row.date)}
+          </span>
+        </div>
+
+        <div className="mt-3 grid grid-cols-2 gap-3">
+          <div>
+            <p className="text-xs text-muted-foreground">Cantidad perdida</p>
+            <p className="font-semibold">
+              {Number(row.quantity || 0).toFixed(2)}{' '}
+              {harvest?.unit?.name || ''}
+            </p>
+          </div>
+
+          <div>
+            <p className="text-xs text-muted-foreground">Motivo</p>
+            <p className="font-semibold">
+              {row.reason?.name || 'Sin motivo'}
+            </p>
+          </div>
+        </div>
+        <div className="mt-3 rounded-lg bg-muted/50 px-3 py-2">
+          <p className="text-xs text-muted-foreground">
+            Efecto sobre la producción útil
+          </p>
+          <p className="mt-1 font-medium">
+            {row.affectsHarvest === true
+              ? 'Sí, descuenta producción útil'
+              : row.affectsHarvest === false
+                ? 'No, solo registro estadístico'
+                : 'Sin clasificar (registro anterior)'}
+          </p>
+        </div>
+        <p className="mt-3 text-xs text-muted-foreground">
+          Cosecha asociada: {formatDate(harvest?.date)}
+        </p>
+
+        {row.notes && (
+          <p className="mt-3 text-xs text-muted-foreground">
+            {row.notes}
+          </p>
+        )}
+      </article>
+    )
+  }
+  if (active === "cosechas") {
+    const losses = row.losses || [];
+
+    const lossTotal = losses.reduce(
+      (sum: number, loss: any) => sum + Number(loss.quantity || 0),
+      0,
+    );
+
+    const affectingLossTotal = losses
+      .filter((loss: any) => loss.affectsHarvest === true)
+      .reduce(
+        (sum: number, loss: any) => sum + Number(loss.quantity || 0),
+        0,
+      );
+
+    const usefulProduction = Math.max(
+      0,
+      Number(row.quantity || 0) - affectingLossTotal,
+    ); return (
+      <article className="rounded-xl border border-border/70 p-4 text-sm">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <p className="font-semibold">{row.crop?.name || "Cultivo"}</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {row.variety?.name ? `${row.variety.name} · ` : ""}
+              {row.productionArea?.name || "Sin lote o zona"}
             </p>
           </div>
           <span className="text-xs text-muted-foreground">
@@ -980,27 +1227,26 @@ const available = Math.max(0, Number(row.quantity || 0) - lossTotal)
           <div>
             <p className="text-xs text-muted-foreground">Cosechado</p>
             <p className="font-semibold">
-              {Number(row.quantity).toFixed(2)} {row.unit?.name || ''}
+              {Number(row.quantity).toFixed(2)} {row.unit?.name || ""}
             </p>
           </div>
           <div>
             <p className="text-xs text-muted-foreground">Merma</p>
             <p className="font-semibold">
-              {lossTotal.toFixed(2)} {row.unit?.name || ''}
+              {lossTotal.toFixed(2)} {row.unit?.name || ""}
             </p>
           </div>
           <div>
-  <p className="text-xs text-muted-foreground">Producción útil</p>
-  <p className="font-semibold">
-    {Number(row.quantity || 0).toFixed(2)} {row.unit?.name || ''}
-  </p>
-</div>
+            <p className="text-xs text-muted-foreground">Producción útil</p>
+            <p className="font-semibold">
+              {usefulProduction.toFixed(2)} {row.unit?.name || ""}            </p>
+          </div>
         </div>
 
         {row.estimatedUnitPrice != null && (
           <p className="mt-3 text-xs text-muted-foreground">
-            Precio estimado: {formatAmount(row.estimatedUnitPrice)} por{' '}
-            {row.unit?.name || 'unidad'}
+            Precio estimado: {formatAmount(row.estimatedUnitPrice)} por{" "}
+            {row.unit?.name || "unidad"}
           </p>
         )}
 
@@ -1011,15 +1257,26 @@ const available = Math.max(0, Number(row.quantity || 0) - lossTotal)
               {losses.map((loss: any) => (
                 <div
                   key={loss.id}
-                  className="flex flex-wrap justify-between gap-2 rounded-lg bg-muted/40 px-3 py-2 text-xs"
+                  className="grid gap-1 rounded-lg bg-muted/40 px-3 py-2 text-xs"
                 >
-                  <span>
-                    {loss.reason?.name || 'Sin motivo'} ·{' '}
-                    {formatDate(loss.date)}
+                  <div className="flex flex-wrap justify-between gap-2">
+                    <span>
+                      {loss.reason?.name || "Sin motivo"} ·{" "}
+                      {formatDate(loss.date)}
+                    </span>
+                    <strong>
+                      {Number(loss.quantity).toFixed(2)}{" "}
+                      {row.unit?.name || ""}
+                    </strong>
+                  </div>
+
+                  <span className="text-muted-foreground">
+                    {loss.affectsHarvest === true
+                      ? "Descuenta producción útil"
+                      : loss.affectsHarvest === false
+                        ? "No descuenta producción útil"
+                        : "Sin clasificar (registro anterior)"}
                   </span>
-                  <strong>
-                    {Number(loss.quantity).toFixed(2)} {row.unit?.name || ''}
-                  </strong>
                 </div>
               ))}
             </div>
@@ -1030,24 +1287,23 @@ const available = Math.max(0, Number(row.quantity || 0) - lossTotal)
           <p className="mt-3 text-xs text-muted-foreground">{row.notes}</p>
         )}
       </article>
-    )
+    );
   }
 
-  if (active === 'envios') {
-    const items = row.items || []
+  if (active === "envios") {
+    const items = row.items || [];
     const total = items.reduce(
-      (sum: number, item: any) =>
-        sum + Number(item.estimatedTotalAmount || 0),
-      0
-    )
+      (sum: number, item: any) => sum + Number(item.estimatedTotalAmount || 0),
+      0,
+    );
 
     return (
       <article className="rounded-xl border border-border/70 p-4 text-sm">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div>
-            <p className="font-semibold">{row.code || 'Envío'}</p>
+            <p className="font-semibold">{row.code || "Envío"}</p>
             <p className="mt-1 text-xs text-muted-foreground">
-              {items.length} producto(s) · {row.status || 'Registrado'}
+              {items.length} producto(s) · {row.status || "Registrado"}
             </p>
           </div>
           <span className="text-xs text-muted-foreground">
@@ -1057,21 +1313,18 @@ const available = Math.max(0, Number(row.quantity || 0) - lossTotal)
 
         <div className="mt-3 grid gap-2">
           {items.map((item: any) => (
-            <div
-              key={item.id}
-              className="rounded-lg bg-muted/40 px-3 py-2"
-            >
+            <div key={item.id} className="rounded-lg bg-muted/40 px-3 py-2">
               <div className="flex justify-between gap-3">
                 <span className="font-medium">
-                  {item.crop?.name || 'Cultivo'}
-                  {item.variety?.name ? ` · ${item.variety.name}` : ''}
+                  {item.crop?.name || "Cultivo"}
+                  {item.variety?.name ? ` · ${item.variety.name}` : ""}
                 </span>
                 <strong className="whitespace-nowrap">
-                  {Number(item.quantity).toFixed(2)} {item.unit?.name || ''}
+                  {Number(item.quantity).toFixed(2)} {item.unit?.name || ""}
                 </strong>
               </div>
               <p className="mt-1 text-xs text-muted-foreground">
-                {item.productionArea?.name || 'Sin lote'} · Precio:{' '}
+                {item.productionArea?.name || "Sin lote"} · Precio:{" "}
                 {formatAmount(item.estimatedUnitPrice)}
               </p>
             </div>
@@ -1079,9 +1332,7 @@ const available = Math.max(0, Number(row.quantity || 0) - lossTotal)
         </div>
 
         <div className="mt-3 flex justify-between border-t border-border/70 pt-3">
-          <span className="text-xs text-muted-foreground">
-            Total estimado
-          </span>
+          <span className="text-xs text-muted-foreground">Total estimado</span>
           <strong>{formatAmount(total)}</strong>
         </div>
 
@@ -1095,20 +1346,20 @@ const available = Math.max(0, Number(row.quantity || 0) - lossTotal)
           <p className="mt-2 text-xs text-muted-foreground">{row.notes}</p>
         )}
       </article>
-    )
+    );
   }
 
   return (
     <article className="rounded-xl border border-border/70 p-4 text-sm">
       <div className="flex flex-wrap justify-between gap-2">
-        <p className="font-semibold">{row.description || 'Costo'}</p>
+        <p className="font-semibold">{row.description || "Costo"}</p>
         <span className="text-xs text-muted-foreground">
           {formatDate(row.date)}
         </span>
       </div>
       <div className="mt-2 flex flex-wrap justify-between gap-2">
         <span className="text-xs text-muted-foreground">
-          {row.category?.name || 'Sin categoría'}
+          {row.category?.name || "Sin categoría"}
         </span>
         <strong>{formatAmount(row.amountUsd)}</strong>
       </div>
@@ -1116,24 +1367,24 @@ const available = Math.max(0, Number(row.quantity || 0) - lossTotal)
         <p className="mt-2 text-xs text-muted-foreground">{row.notes}</p>
       )}
     </article>
-  )
+  );
 }
 
 export function ProductionSummary() {
-  const { data, error } = useSWR<any>(
-    '/api/production-summary',
-    fetcher
-  )
+  const { data, error } = useSWR<any>("/api/production-summary", fetcher);
+
 
   const cards = [
-    ['Cosechas', data?.harvests?._count ?? 0],
-    ['Mermas', data?.losses?._count ?? 0],
+    ["Cosechas", data?.harvests?._count ?? 0],
     [
-      'Costos',
-      formatAmount(data?.costs?._sum?.amountUsd),
+      "Producción útil",
+      `${Number(data?.usefulProduction ?? 0).toFixed(2)}`,
     ],
-    ['Envíos', data?.shipments?._count ?? 0],
-  ]
+    ["Mermas", data?.losses?._count ?? 0],
+    ["Costos", formatAmount(data?.costs?._sum?.amountUsd)],
+    ["Envíos", data?.shipments?._count ?? 0],
+  ];
+
 
   return (
     <section className="mt-8">
@@ -1143,24 +1394,19 @@ export function ProductionSummary() {
         </p>
       )}
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {cards.map(([label, value]) => (
-          <div
-            key={String(label)}
-            className="rounded-2xl border border-[#e1e9e1] bg-white/80 p-5 dark:border-[#2d3b32] dark:bg-[#18211c]"
-          >
-            <p className="text-xs font-medium text-muted-foreground">
-              {label}
-            </p>
-            <p className="mt-5 text-2xl font-semibold">{value}</p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {data
-                ? 'Datos confirmados en PostgreSQL'
-                : 'Cargando datos…'}
-            </p>
-          </div>
-        ))}
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">        {cards.map(([label, value]) => (
+        <div
+          key={String(label)}
+          className="rounded-2xl border border-[#e1e9e1] bg-white/80 p-5 dark:border-[#2d3b32] dark:bg-[#18211c]"
+        >
+          <p className="text-xs font-medium text-muted-foreground">{label}</p>
+          <p className="mt-5 text-2xl font-semibold">{value}</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {data ? "Datos confirmados en PostgreSQL" : "Cargando datos…"}
+          </p>
+        </div>
+      ))}
       </div>
     </section>
-  )
+  );
 }

@@ -161,26 +161,37 @@ const unit = await tx.unit.findFirst({
         for (const harvest of harvests) {
           if (remaining <= 0) break
 
-          const previousAllocations = await tx.shipmentAllocation.aggregate({
-  where: {
-    harvestId: harvest.id,
-    deletedAt: null,
-    shipmentItem: {
-      deletedAt: null,
-      shipment: {
-        deletedAt: null,
-        status: {
-          not: 'CANCELLED',
-        },
-      },
-    },
-  },
-  _sum: { quantity: true },
-})
+                    const [previousAllocations, previousLosses] = await Promise.all([
+            tx.shipmentAllocation.aggregate({
+              where: {
+                harvestId: harvest.id,
+                deletedAt: null,
+                shipmentItem: {
+                  deletedAt: null,
+                  shipment: {
+                    deletedAt: null,
+                    status: { not: 'CANCELLED' },
+                  },
+                },
+              },
+              _sum: { quantity: true },
+            }),
 
-const available =
-  Number(harvest.quantity) -
-  Number(previousAllocations._sum.quantity ?? 0)
+            tx.loss.aggregate({
+              where: {
+                harvestId: harvest.id,
+                status: 'ACTIVE',
+                deletedAt: null,
+                affectsHarvest: true,
+              },
+              _sum: { quantity: true },
+            }),
+          ])
+
+          const available =
+            Number(harvest.quantity) -
+            Number(previousAllocations._sum.quantity ?? 0) -
+            Number(previousLosses._sum.quantity ?? 0)
           if (available <= 0) continue
 
           const allocated = Math.min(available, remaining)

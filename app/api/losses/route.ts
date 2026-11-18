@@ -52,6 +52,7 @@ export async function GET() {
   }
 }
 
+
 export async function POST(request: Request) {
   try {
     const body = await request.json() as Record<string, unknown>
@@ -61,74 +62,108 @@ export async function POST(request: Request) {
       typeof body.harvestId === 'string' ? body.harvestId : ''
     const quantity = parsePositiveDecimal(body.quantity)
     const reasonName = cleanName(body.reason)
+    const affectsHarvest = body.affectsHarvest
 
-    if (!date || !harvestId || !quantity || !reasonName) {
+    if (
+      !date ||
+      !harvestId ||
+      !quantity ||
+      !reasonName ||
+      typeof affectsHarvest !== 'boolean'
+    ) {
       return NextResponse.json(
-        { error: 'Selecciona una cosecha e indica fecha, cantidad y motivo.' },
-        { status: 400 }
+        {
+          error:
+            'Selecciona una cosecha, indica fecha, cantidad, motivo y si la merma afecta a la producción útil.',
+        },
+        { status: 400 },
       )
     }
 
     const row = await prisma.$transaction(async (tx) => {
       const harvest = await tx.harvest.findFirst({
-  where: {
-    id: harvestId,
-    status: 'ACTIVE',
-    deletedAt: null,
-  },
-})
+        where: {
+          id: harvestId,
+          status: 'ACTIVE',
+          deletedAt: null,
+        },
+      })
+
       if (!harvest) {
         throw new Error('La cosecha seleccionada no existe o está inactiva.')
       }
 
-      const allocations = await tx.shipmentAllocation.aggregate({
-  where: {
-    harvestId,
-    deletedAt: null,
-    shipmentItem: {
-      deletedAt: null,
-      shipment: {
-        deletedAt: null,
-        status: { not: 'CANCELLED' },
-      },
-    },
-  },
-  _sum: { quantity: true },
-})
+      if (affectsHarvest) {
+        const [allocations, previousLosses] = await Promise.all([
+          tx.shipmentAllocation.aggregate({
+            where: {
+              harvestId,
+              deletedAt: null,
+              shipmentItem: {
+                deletedAt: null,
+                shipment: {
+                  deletedAt: null,
+                  status: { not: 'CANCELLED' },
+                },
+              },
+            },
+            _sum: { quantity: true },
+          }),
 
-const harvested = Number(harvest.quantity)
-const alreadyShipped = Number(allocations._sum.quantity ?? 0)
-const available = harvested - alreadyShipped
-      if (quantity > available) {
-        throw new Error(
-          `Cantidad superior a la disponible. Existencias de esta cosecha: ${Math.max(0, available)} ${harvest.unitId ? '' : ''}.`
+          tx.loss.aggregate({
+            where: {
+              harvestId,
+              status: 'ACTIVE',
+              deletedAt: null,
+              affectsHarvest: true,
+            },
+            _sum: { quantity: true },
+          }),
+        ])
+
+        const harvested = Number(harvest.quantity)
+        const alreadyShipped = Number(
+          allocations._sum.quantity ?? 0,
         )
+        const previousLossesTotal = Number(
+          previousLosses._sum.quantity ?? 0,
+        )
+
+        const available =
+          harvested - alreadyShipped - previousLossesTotal
+
+        if (quantity > available) {
+          throw new Error(
+            `Cantidad superior a la producción útil disponible. Disponible: ${Math.max(0, available)}.`,
+          )
+        }
       }
 
       const normalizedName = normalizeName(reasonName)
 
       const existingReason = await tx.lossReason.findUnique({
-  where: { normalizedName },
-})
+        where: { normalizedName },
+      })
 
-if (existingReason?.deletedAt) {
-  throw new Error('LOSS_REASON_IN_TRASH')
-}
+      if (existingReason?.deletedAt) {
+        throw new Error('LOSS_REASON_IN_TRASH')
+      }
 
-const reason = existingReason
-  ? await tx.lossReason.update({
-      where: { id: existingReason.id },
-      data: { name: reasonName, active: true },
-    })
-  : await tx.lossReason.create({
-      data: { name: reasonName, normalizedName },
-    })
+      const reason = existingReason
+        ? await tx.lossReason.update({
+            where: { id: existingReason.id },
+            data: { name: reasonName, active: true },
+          })
+        : await tx.lossReason.create({
+            data: { name: reasonName, normalizedName },
+          })
 
       return tx.loss.create({
         data: {
           harvestId,
           date,
           quantity,
+          affectsHarvest,
           reasonId: reason.id,
           notes: cleanName(body.notes) || null,
         },
@@ -139,16 +174,20 @@ const reason = existingReason
     return NextResponse.json(row, { status: 201 })
   } catch (error) {
     const message =
-      error instanceof Error ? error.message : 'No se pudo registrar la merma.'
-      if (message === 'LOSS_REASON_IN_TRASH') {
-  return NextResponse.json(
-    {
-      error:
-        'Este motivo de merma está en la papelera. Restáuralo antes de utilizarlo nuevamente.',
-    },
-    { status: 409 }
-  )
-}
+      error instanceof Error
+        ? error.message
+        : 'No se pudo registrar la merma.'
+
+    if (message === 'LOSS_REASON_IN_TRASH') {
+      return NextResponse.json(
+        {
+          error:
+            'Este motivo de merma está en la papelera. Restáuralo antes de utilizarlo nuevamente.',
+        },
+        { status: 409 },
+      )
+    }
+
     if (
       message.includes('no existe') ||
       message.includes('disponible')
@@ -160,10 +199,11 @@ const reason = existingReason
 
     return NextResponse.json(
       { error: 'No se pudo registrar la merma.' },
-      { status: 500 }
+      { status: 500 },
     )
   }
 }
+
 export async function DELETE(request: Request) {
   try {
     const body = await request.json()

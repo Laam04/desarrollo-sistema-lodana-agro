@@ -130,17 +130,18 @@ model LossReason {
 }
 
 model Loss {
-  id        String    @id @default(cuid())
-  harvestId String
-  date      DateTime
-  quantity  Decimal   @db.Decimal(12, 2)
-  reasonId  String
-  notes     String?
-  status    String    @default("ACTIVE")
-  createdBy String?
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  deletedAt DateTime?
+  id             String    @id @default(cuid())
+  harvestId      String
+  date           DateTime
+  quantity       Decimal   @db.Decimal(12, 2)
+  affectsHarvest Boolean?
+  reasonId       String
+  notes          String?
+  status         String    @default("ACTIVE")
+  createdBy      String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
 
   harvest Harvest    @relation(fields: [harvestId], references: [id])
   reason  LossReason @relation(fields: [reasonId], references: [id])
