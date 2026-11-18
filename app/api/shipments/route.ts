@@ -9,12 +9,14 @@ import {
 
 const shipmentInclude = {
   items: {
+    where: { deletedAt: null },
     include: {
       crop: true,
       variety: true,
       productionArea: true,
       unit: true,
       allocations: {
+        where: { deletedAt: null },
         include: {
           harvest: true,
         },
@@ -22,8 +24,11 @@ const shipmentInclude = {
     },
   },
   receptions: {
+    where: { deletedAt: null },
     include: {
-      items: true,
+      items: {
+        where: { deletedAt: null },
+      },
     },
   },
 }
@@ -101,11 +106,11 @@ export async function POST(request: Request) {
         }
 
         const crop = await tx.crop.findFirst({
-          where: { id: cropId, active: true },
-          include: {
-            varieties: { where: { active: true } },
-            productionAreas: { where: { active: true } },
-          },
+          where: { id: cropId, active: true, deletedAt: null },
+include: {
+  varieties: { where: { active: true, deletedAt: null } },
+  productionAreas: { where: { active: true, deletedAt: null } },
+},
         })
 
         if (!crop) {
@@ -136,7 +141,7 @@ if (!unitId) {
 }
 
 const unit = await tx.unit.findFirst({
-  where: { id: unitId, active: true },
+where: { id: unitId, active: true, deletedAt: null },
 })
 
         if (!unit) {
@@ -145,13 +150,16 @@ const unit = await tx.unit.findFirst({
 
         const harvests = await tx.harvest.findMany({
   where: {
-    cropId,
-    varietyId,
-    productionAreaId,
-    unitId: unit.id,
-    status: 'ACTIVE',
+  cropId,
+  varietyId,
+  productionAreaId,
+  unitId: unit.id,
+  status: 'ACTIVE',
+  deletedAt: null,
+  crop: {
     deletedAt: null,
   },
+},
           orderBy: [{ date: 'asc' }, { createdAt: 'asc' }],
         })
 
@@ -233,17 +241,29 @@ const unit = await tx.unit.findFirst({
         })
       }
 
-      return tx.shipment.findUniqueOrThrow({
+            return tx.shipment.findUniqueOrThrow({
         where: { id: shipment.id },
         include: shipmentInclude,
       })
+    }, {
+      isolationLevel: 'Serializable',
     })
 
     return NextResponse.json(result, { status: 201 })
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'No se pudo registrar el envío.'
-
+      if (
+  typeof error === 'object' &&
+  error !== null &&
+  'code' in error &&
+  error.code === 'P2034'
+) {
+  return NextResponse.json(
+    { error: 'El inventario cambió mientras se procesaba el envío. Inténtalo nuevamente.' },
+    { status: 409 }
+  )
+}
     if (
       message.includes('no existe') ||
       message.includes('inactivo') ||
