@@ -1,8 +1,8 @@
 'use client'
 
-import { useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useEffect, useRef, useState } from 'react'
 import { Leaf, PackageCheck, Search, Settings, ArrowRight, X, ShieldCheck } from 'lucide-react'
+import { productionFetch } from '@/lib/production-client'
 
 type Profile = 'production' | 'reception' | 'queries' | 'admin'
 
@@ -13,11 +13,18 @@ const profiles = [
 ]
 
 export function ProfileSelector() {
-  const router = useRouter()
   const [selected, setSelected] = useState<Profile | null>(null)
   const [pin, setPin] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const dialogRef = useRef<HTMLDialogElement>(null)
+
+  useEffect(() => {
+    const dialog = dialogRef.current
+    if (!selected || !dialog) return
+    dialog.showModal()
+    return () => dialog.close()
+  }, [selected])
 
   const selectedProfile = selected === 'admin' ? { title: 'Administración', icon: ShieldCheck, color: 'violet' } : profiles.find((profile) => profile.id === selected)
 
@@ -29,13 +36,17 @@ export function ProfileSelector() {
 
   async function submitPin(event: React.FormEvent) {
     event.preventDefault()
+    if (loading) return
     if (!selected || pin.length !== 4) return setError('Introduce un PIN de 4 dígitos.')
     setLoading(true)
     setError('')
-    const response = await fetch('/api/profile-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile: selected, pin }) })
-    setLoading(false)
-    if (!response.ok) return setError('El PIN no es correcto. Inténtalo de nuevo.')
-    router.push(selected === 'admin' ? '/administracion' : selected === 'production' ? '/lodana' : selected === 'reception' ? '/agro-market' : '/consultas')
+    try {
+      await productionFetch('/api/profile-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile: selected, pin }) })
+      window.location.assign(selected === 'admin' ? '/administracion' : selected === 'production' ? '/lodana' : selected === 'reception' ? '/agro-market' : '/consultas')
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'No se pudo iniciar sesión.')
+      setLoading(false)
+    }
   }
 
   return (
@@ -50,7 +61,42 @@ export function ProfileSelector() {
         </section>
         <footer className="text-center text-xs text-muted-foreground">Lodana Agro · Acceso por perfiles</footer>
       </div>
-      {selected && selectedProfile && <div role="dialog" aria-modal="true" aria-labelledby="pin-title" className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-5"><div className="w-full max-w-sm rounded-3xl border border-border bg-background p-6 shadow-2xl"><div className="flex items-start justify-between"><div><div className="flex size-10 items-center justify-center rounded-xl bg-[#e2f0e5] text-[#2c6048]"><selectedProfile.icon /></div><h2 id="pin-title" className="mt-4 text-xl font-semibold">{selectedProfile.title}</h2><p className="mt-1 text-sm text-muted-foreground">Introduce tu PIN para continuar.</p></div><button aria-label="Cerrar" onClick={() => setSelected(null)} className="rounded-lg p-2 text-muted-foreground hover:bg-muted"><X /></button></div><form onSubmit={submitPin} className="mt-6"><label htmlFor="profile-pin" className="text-sm font-medium">PIN de acceso</label><input id="profile-pin" autoFocus inputMode="numeric" maxLength={4} pattern="[0-9]{4}" value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, ''))} className="mt-2 w-full rounded-xl border border-input bg-background px-4 py-3 text-center text-2xl tracking-[0.5em] outline-none ring-offset-background focus:ring-2 focus:ring-[#2c6048]" placeholder="••••" /><p className="mt-2 min-h-5 text-center text-sm text-destructive">{error}</p><button disabled={loading} className="mt-3 w-full rounded-xl bg-[#2c6048] px-4 py-3 text-sm font-semibold text-white disabled:opacity-60">{loading ? 'Validando…' : 'Continuar'}</button></form><p className="mt-4 text-center text-[11px] text-muted-foreground">Los PIN de prueba deben sustituirse por autenticación segura antes de producción.</p></div></div>}
+      {selected && selectedProfile && (
+        <dialog
+          ref={dialogRef}
+          aria-labelledby="pin-title"
+          onCancel={(event) => { event.preventDefault(); if (!loading) setSelected(null) }}
+          className="m-auto w-[calc(100%-2rem)] max-w-sm rounded-3xl border border-border bg-background p-6 text-foreground shadow-2xl backdrop:bg-black/40"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="flex size-10 items-center justify-center rounded-xl bg-[#e2f0e5] text-[#2c6048]"><selectedProfile.icon /></div>
+              <h2 id="pin-title" className="mt-4 text-xl font-semibold">{selectedProfile.title}</h2>
+              <p className="mt-1 text-sm text-muted-foreground">Introduce tu PIN para continuar.</p>
+            </div>
+            <button type="button" aria-label="Cerrar" disabled={loading} onClick={() => setSelected(null)} className="rounded-lg p-2 text-muted-foreground hover:bg-muted disabled:opacity-50"><X /></button>
+          </div>
+          <form onSubmit={submitPin} className="mt-6">
+            <label htmlFor="profile-pin" className="text-sm font-medium">PIN de acceso</label>
+            <input
+              id="profile-pin"
+              autoFocus
+              required
+              type="password"
+              autoComplete="off"
+              inputMode="numeric"
+              maxLength={4}
+              pattern="[0-9]{4}"
+              value={pin}
+              onChange={(event) => setPin(event.target.value.replace(/\D/g, ''))}
+              className="mt-2 w-full rounded-xl border border-input bg-background px-4 py-3 text-center text-2xl tracking-[0.5em] outline-none ring-offset-background focus:ring-2 focus:ring-[#2c6048]"
+              placeholder="••••"
+            />
+            {error && <p role="alert" className="mt-2 text-center text-sm text-destructive">{error}</p>}
+            <button disabled={loading} className="mt-3 w-full rounded-xl bg-[#2c6048] px-4 py-3 text-sm font-semibold text-white disabled:opacity-60">{loading ? 'Validando…' : 'Continuar'}</button>
+          </form>
+        </dialog>
+      )}
     </main>
   )
 }

@@ -1,7 +1,11 @@
 "use client";
 
 import useSWR from "swr";
+import { formatDate, invalidateProduction, productionFetch, today } from "@/lib/production-client";
+import { receiptCode } from "@/lib/market-data";
+import { editableShipmentStatuses, shipmentStatusLabels } from "@/lib/shipment-status";
 import {
+  useDeferredValue,
   useEffect,
   useMemo,
   useRef,
@@ -48,11 +52,15 @@ type Unit = { id: string; name: string };
 
 type Availability = {
   cropId: string;
+  cropName: string;
   varietyId: string | null;
+  varietyName: string | null;
   productionAreaId: string | null;
+  productionAreaName: string | null;
   unitId: string;
   unitName?: string;
   available: number | string;
+  estimatedUnitPrice: string | null;
 };
 
 type ShipmentLine = {
@@ -63,7 +71,63 @@ type ShipmentLine = {
   unitId: string;
   quantity: string;
   unitPrice: string;
+  notes?: string | null;
 };
+
+type Quantity = string | number;
+type LossDetails = {
+  id: string;
+  date: string;
+  quantity: Quantity;
+  affectsHarvest: boolean | null;
+  reason?: { name: string };
+};
+type ShipmentProduct = {
+  id: string;
+  cropId: string;
+  varietyId: string | null;
+  productionAreaId: string | null;
+  unitId: string;
+  quantity: Quantity;
+  estimatedUnitPrice: Quantity | null;
+  estimatedTotalAmount: Quantity | null;
+  crop?: Crop;
+  variety?: { name: string } | null;
+  productionArea?: { name: string } | null;
+  unit?: Unit;
+  notes?: string | null;
+};
+type HistoryRow = {
+  id: string;
+  date: string;
+  notes?: string | null;
+  cropId?: string;
+  unitId?: string;
+  varietyId?: string | null;
+  productionAreaId?: string | null;
+  crop?: Crop;
+  variety?: { name: string } | null;
+  productionArea?: { name: string } | null;
+  unit?: Unit;
+  quantity?: Quantity;
+  estimatedUnitPrice?: Quantity | null;
+  losses?: LossDetails[];
+  harvest?: HistoryRow;
+  harvestId?: string;
+  reason?: { name: string };
+  affectsHarvest?: boolean | null;
+  description?: string;
+  category?: { name: string };
+  amountUsd?: Quantity;
+  applicationType?: string;
+  allocations?: { cropId: string | null; crop: Crop | null; amountUsd: Quantity | null }[];
+  code?: string;
+  status?: string;
+  items?: ShipmentProduct[];
+  receptions?: { receiptNumber?: number; items: { shipmentItemId: string; receivedQuantity: Quantity }[] }[];
+};
+
+type HistoryPage = { rows: HistoryRow[]; hasNext: boolean };
 
 type Message = {
   kind: "success" | "error";
@@ -77,7 +141,7 @@ type Tone = "primary" | "danger" | "warning";
    y rojo (destructivo). Todo lo demás usa los tokens del tema. */
 
 const card =
-  "rounded-2xl border border-emerald-900/10 bg-white shadow-sm dark:border-emerald-100/10 dark:bg-zinc-900/60";
+  "rounded-2xl border border-emerald-900/10 bg-white shadow-sm dark:border-emerald-100/10 dark:bg-[#18211c]";
 
 const innerBox =
   "rounded-xl border border-border/70 bg-muted/30 dark:bg-white/[0.03]";
@@ -117,24 +181,7 @@ const toneStyles: Record<
 
 /* ───────────────────────── Utilidades ───────────────────────── */
 
-const fetcher = async (url: string) => {
-  const response = await fetch(url);
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(data.error || "No se pudieron cargar los datos.");
-  }
-
-  return data;
-};
-
-function today() {
-  const date = new Date();
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
+const fetcher = productionFetch;
 
 let lineSequence = 0;
 
@@ -163,18 +210,17 @@ function stockKey(
   );
 }
 
-// Las fechas se guardan como día (medianoche UTC). Si se pasan por
-// `new Date()` en Ecuador (UTC-5) se mostrarían un día antes.
-function formatDate(value?: string) {
-  if (!value) return "—";
-  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value));
-  if (match) return `${match[3]}/${match[2]}/${match[1]}`;
-  return new Date(value).toLocaleDateString("es-EC");
+const currency = new Intl.NumberFormat('es-EC', { style: 'currency', currency: 'USD' });
+function formatAmount(value: unknown) {
+  return currency.format(Number(value ?? 0));
 }
 
-function formatAmount(value: unknown) {
-  const amount = Number(value || 0);
-  return `$${amount.toFixed(2)}`;
+function shipmentSubtotal(line: ShipmentLine) {
+  const quantity = Math.round(Number(line.quantity) * 100);
+  const price = Math.round(Number(line.unitPrice) * 100);
+  if (!Number.isSafeInteger(quantity) || !Number.isSafeInteger(price) || quantity < 0 || price < 0) return 0;
+  const cents = (BigInt(quantity) * BigInt(price) + BigInt(50)) / BigInt(100);
+  return Number(cents) / 100;
 }
 
 /* ───────────────────── Componentes de apoyo ───────────────────── */
@@ -296,16 +342,13 @@ function ConfirmDialog({
   onConfirm: () => void;
   onClose: () => void;
 }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
   useEffect(() => {
-    if (!open) return;
-
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !loading) onClose();
-    }
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, loading, onClose]);
+    const dialog = dialogRef.current;
+    if (!open || !dialog) return;
+    dialog.showModal();
+    return () => dialog.close();
+  }, [open]);
 
   if (!open) return null;
 
@@ -313,14 +356,14 @@ function ConfirmDialog({
   const Icon = icon ?? style.icon;
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
+    <dialog
+      ref={dialogRef}
       aria-label={title}
+      onCancel={(event) => { event.preventDefault(); if (!loading) onClose(); }}
       onClick={(event) => {
         if (event.target === event.currentTarget && !loading) onClose();
       }}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
+      className="m-auto w-[calc(100%-2rem)] max-w-lg overflow-visible bg-transparent p-0 text-foreground backdrop:bg-black/50 backdrop:backdrop-blur-sm"
     >
       <div className="flex max-h-[88vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-border bg-background shadow-2xl">
         <div className="flex items-start gap-4 p-5">
@@ -370,7 +413,7 @@ function ConfirmDialog({
           </button>
         </div>
       </div>
-    </div>
+    </dialog>
   );
 }
 
@@ -444,13 +487,12 @@ export function ProductionRecords({ active }: { active: string }) {
     null,
   );
   const [editingCode, setEditingCode] = useState("");
-  const [originalQty, setOriginalQty] = useState<Record<string, number>>({});
   const [shipmentNotes, setShipmentNotes] = useState("");
   const [shipmentLines, setShipmentLines] = useState<ShipmentLine[]>(() => [
     emptyShipmentLine(),
   ]);
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const [shipmentToCancel, setShipmentToCancel] = useState<any | null>(null);
+  const [shipmentToCancel, setShipmentToCancel] = useState<HistoryRow | null>(null);
   const [cancelling, setCancelling] = useState(false);
 
   // Confirmaciones adicionales
@@ -461,11 +503,12 @@ export function ProductionRecords({ active }: { active: string }) {
     { label: string; value: string }[] | null
   >(null);
 
-  const { data: crops = [] } = useSWR<Crop[]>("/api/crops", fetcher);
-  const { data: units = [] } = useSWR<Unit[]>("/api/units", fetcher);
-  const { data: harvestOptions = [] } = useSWR<any[]>(
-    isLosses ? "/api/harvests" : null,
-    fetcher,
+  const { data: crops = [], error: cropsError } = useSWR<Crop[]>("/api/crops", fetcher);
+  const { data: units = [], error: unitsError } = useSWR<Unit[]>(isCosts || isLosses ? null : "/api/units", fetcher);
+  const [harvestSearch, setHarvestSearch] = useState("");
+  const deferredHarvestSearch = useDeferredValue(harvestSearch);
+  const { data: harvestResults, error: harvestOptionsError } = useSWR<HistoryPage>(
+    isLosses ? `/api/harvests?${new URLSearchParams({ page: '1', q: deferredHarvestSearch })}` : null, fetcher,
   );
   const {
     data: shipmentAvailability = [],
@@ -473,7 +516,9 @@ export function ProductionRecords({ active }: { active: string }) {
     isLoading: availabilityLoading,
     mutate: mutateAvailability,
   } = useSWR<Availability[]>(
-    isShipments ? "/api/shipments/availability" : null,
+    isShipments && formDate ? `/api/shipments/availability?${new URLSearchParams({
+      asOf: formDate, ...(editingShipmentId ? { editShipmentId: editingShipmentId } : {}),
+    })}` : null,
     fetcher,
   );
 
@@ -481,15 +526,25 @@ export function ProductionRecords({ active }: { active: string }) {
   const [to, setTo] = useState("");
   const [filterCropId, setFilterCropId] = useState("");
   const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search);
+  const [page, setPage] = useState(1);
 
   const [cropId, setCropId] = useState("");
-  const selectedCrop = crops.find((crop) => crop.id === cropId);
+  const [editingRecord, setEditingRecord] = useState<HistoryRow | null>(null);
+  const [linkedHarvest, setLinkedHarvest] = useState<HistoryRow | null>(null);
+  const [lossHarvestId, setLossHarvestId] = useState("");
+  const harvestOptions = [...(harvestResults?.rows ?? [])];
+  if (linkedHarvest && !harvestOptions.some((row) => row.id === linkedHarvest.id)) harvestOptions.unshift(linkedHarvest);
+  const selectedCrop: Crop | undefined = crops.find((crop) => crop.id === cropId) ??
+    (editingRecord?.crop?.id === cropId ? editingRecord?.crop : undefined);
   const [unitId, setUnitId] = useState("");
+  const [costApplication, setCostApplication] = useState("GENERAL");
+  const [costCropId, setCostCropId] = useState("");
 
   const [message, setMessage] = useState<Message | null>(null);
   const [saving, setSaving] = useState(false);
-  const [lossToDelete, setLossToDelete] = useState<any | null>(null);
-  const [deletingLoss, setDeletingLoss] = useState(false);
+  const [recordToDelete, setRecordToDelete] = useState<HistoryRow | null>(null);
+  const [deletingRecord, setDeletingRecord] = useState(false);
 
   // Los avisos se cierran solos
   useEffect(() => {
@@ -501,95 +556,56 @@ export function ProductionRecords({ active }: { active: string }) {
     return () => clearTimeout(timer);
   }, [message]);
 
-  const endpoint = isHarvests
-    ? isLosses
-      ? "/api/losses"
-      : `/api/harvests?${new URLSearchParams({
-          ...(from ? { from } : {}),
-          ...(to ? { to } : {}),
-          ...(filterCropId ? { cropId: filterCropId } : {}),
-        }).toString()}`
-    : isShipments
-      ? "/api/shipments"
-      : isCosts
-        ? "/api/costs"
-        : null;
+  const endpoint = isLosses ? "/api/losses" : isHarvests ? "/api/harvests" : isShipments ? "/api/shipments" : "/api/costs";
+  const query = new URLSearchParams({ page: String(page), from, to, cropId: filterCropId, q: deferredSearch });
 
   const {
-    data: rows = [],
+    data: history,
     error: loadError,
     isLoading: rowsLoading,
     mutate,
-  } = useSWR<any[]>(endpoint, fetcher);
-
-  const visibleRows = useMemo(() => {
-    return rows.filter((row) => {
-      const textMatches = JSON.stringify(row)
-        .toLocaleLowerCase()
-        .includes(search.toLocaleLowerCase());
-
-      if (!textMatches) return false;
-
-      if (!isHarvests || isLosses) {
-        const rowDay = row.date ? String(row.date).slice(0, 10) : "";
-        if (from && (!rowDay || rowDay < from)) return false;
-        if (to && (!rowDay || rowDay > to)) return false;
-      }
-
-      if (isLosses && filterCropId) {
-        if (row.harvest?.cropId !== filterCropId) {
-          return false;
-        }
-      }
-
-      return true;
-    });
-  }, [rows, search, from, to, isHarvests, isLosses, filterCropId]);
+  } = useSWR<HistoryPage>(`${endpoint}?${query}`, fetcher);
+  const visibleRows = history?.rows ?? [];
 
   const hasFilters = Boolean(from || to || search || filterCropId);
 
+  function refreshRecords(alsoTrash = false) {
+    const endpoints = isHarvests ? ['/api/harvests', '/api/losses', '/api/shipments/availability']
+      : isShipments ? ['/api/shipments', '/api/shipments/availability'] : [endpoint];
+    if (alsoTrash) endpoints.push('/api/trash');
+    void invalidateProduction('/api/production-summary', ...endpoints);
+  }
+
   function clearFilters() {
+    setPage(1);
     setFrom("");
     setTo("");
     setSearch("");
     setFilterCropId("");
   }
 
-  async function deleteLoss() {
-    if (!lossToDelete) return;
-
-    setDeletingLoss(true);
-
+  async function deleteRecord() {
+    if (!recordToDelete || deletingRecord) return;
+    setDeletingRecord(true);
     try {
-      const response = await fetch("/api/losses", {
+      await productionFetch(endpoint, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: lossToDelete.id }),
+        body: JSON.stringify({ id: recordToDelete.id }),
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || "No se pudo eliminar la merma.");
-      }
-
-      await mutate();
-      setLossToDelete(null);
-      setMessage({
-        kind: "success",
-        text: "Merma enviada a la papelera correctamente.",
-      });
+      if (editingRecord?.id === recordToDelete.id) resetRecordForm();
+      setRecordToDelete(null);
+      setMessage({ kind: "success", text: "Registro movido a la papelera." });
+      if (visibleRows.length === 1 && page > 1) setPage(page - 1);
+      refreshRecords(true);
     } catch (error) {
-      setLossToDelete(null);
+      setRecordToDelete(null);
       setMessage({
         kind: "error",
-        text:
-          error instanceof Error
-            ? error.message
-            : "No se pudo eliminar la merma.",
+        text: error instanceof Error ? error.message : "No se pudo eliminar el registro.",
       });
     } finally {
-      setDeletingLoss(false);
+      setDeletingRecord(false);
     }
   }
 
@@ -627,17 +643,9 @@ export function ProductionRecords({ active }: { active: string }) {
   );
 
   function describeStock(item: Availability) {
-    const crop = crops.find((c) => c.id === item.cropId);
-    const variety = crop?.varieties?.find(
-      (v) => v.id === item.varietyId,
-    )?.name;
-    const area = crop?.productionAreas?.find(
-      (a) => a.id === item.productionAreaId,
-    )?.name;
-
     return {
-      title: crop?.name ?? "Cultivo",
-      detail: [variety, area].filter(Boolean).join(" · "),
+      title: item.cropName,
+      detail: [item.varietyName, item.productionAreaName].filter(Boolean).join(" · "),
     };
   }
 
@@ -674,8 +682,7 @@ export function ProductionRecords({ active }: { active: string }) {
       return key;
     });
 
-    const availableFor = (key: string) =>
-      Number(stockByKey.get(key)?.available ?? 0) + (originalQty[key] ?? 0);
+    const availableFor = (key: string) => Number(stockByKey.get(key)?.available ?? 0);
 
     const exceeds = lineKeys.map(
       (key) =>
@@ -695,13 +702,12 @@ export function ProductionRecords({ active }: { active: string }) {
         shipmentLines.length > 0 &&
         !incomplete &&
         !hasStockError &&
-        !availabilityLoading,
+        !availabilityLoading && !availabilityError && Boolean(formDate),
     };
-  }, [shipmentLines, crops, stockByKey, originalQty, availabilityLoading]);
+  }, [shipmentLines, crops, stockByKey, availabilityLoading, availabilityError, formDate]);
 
   const totalShipment = shipmentLines.reduce(
-    (total, line) =>
-      total + Number(line.quantity || 0) * Number(line.unitPrice || 0),
+    (total, line) => total + shipmentSubtotal(line),
     0,
   );
 
@@ -738,26 +744,27 @@ export function ProductionRecords({ active }: { active: string }) {
     }
   }
 
-  function lineFromStock(item: Availability) {
+  function lineFromStock(item: Availability, unitPrice = "") {
     return emptyShipmentLine({
       cropId: item.cropId,
       varietyId: item.varietyId ?? "",
       productionAreaId: item.productionAreaId ?? "",
       unitId: item.unitId,
       quantity: String(item.available),
+      unitPrice,
     });
   }
 
-  function applyPrepareAll() {
-    setShipmentLines(availableStock.map(lineFromStock));
-    setPrepareOpen(false);
-    setMessage({
-      kind: "success",
-      text: `Se cargaron ${availableStock.length} producto(s) con todas las existencias. Indica el precio de cada uno.`,
-    });
-  }
-
-  function prepareAllAvailableHarvests() {
+  function prepareAllAvailableHarvests(replace = false) {
+    if (replace) setPrepareOpen(false);
+    if (availabilityError || availabilityLoading || !formDate) {
+      setMessage({ kind: "error", text: "Consulta las existencias de la fecha seleccionada antes de preparar el envío." });
+      return;
+    }
+    if (availableStock.length > 100) {
+      setMessage({ kind: 'error', text: 'Puedes incluir hasta 100 productos por envío. Agrega los deseados desde las existencias disponibles.' });
+      return;
+    }
     if (availableStock.length === 0) {
       setMessage({
         kind: "error",
@@ -766,13 +773,20 @@ export function ProductionRecords({ active }: { active: string }) {
       return;
     }
 
-    // Si ya hay datos escritos, se pide confirmación antes de reemplazarlos
-    if (shipmentLines.some(lineHasData)) {
+    if (!replace && shipmentLines.some(lineHasData)) {
       setPrepareOpen(true);
       return;
     }
 
-    applyPrepareAll();
+    const lines = availableStock.map((item) => lineFromStock(item, item.estimatedUnitPrice ?? ""));
+    const hasMissingPrices = lines.some((line) => !line.unitPrice);
+    setShipmentLines(lines);
+    setMessage({
+      kind: hasMissingPrices ? "error" : "success",
+      text: hasMissingPrices
+        ? "Se cargaron las existencias. Completa los precios de los productos con cosechas sin precio estimado."
+        : "Se cargaron las existencias con sus precios estimados. Revisa y confirma el envío.",
+    });
   }
 
   function addStockLine(item: Availability) {
@@ -784,9 +798,10 @@ export function ProductionRecords({ active }: { active: string }) {
     );
 
     setShipmentLines((current) => {
-      const base = current.filter((line) => line.cropId);
-      if (base.some((line) => keyOf(line) === key)) return current;
-      return [...base, lineFromStock(item)];
+      if (current.some((line) => keyOf(line) === key)) return current;
+      const emptyIndex = current.findIndex((line) => !lineHasData(line));
+      if (emptyIndex !== -1) return current.map((line, index) => index === emptyIndex ? lineFromStock(item) : line);
+      return current.length < 100 ? [...current, lineFromStock(item)] : current;
     });
     setMessage(null);
   }
@@ -794,14 +809,13 @@ export function ProductionRecords({ active }: { active: string }) {
   function resetShipmentForm() {
     setEditingShipmentId(null);
     setEditingCode("");
-    setOriginalQty({});
     setFormDate(today());
     setShipmentNotes("");
     setShipmentLines([emptyShipmentLine()]);
   }
 
-  function editShipment(row: any) {
-    const lines: ShipmentLine[] = (row.items || []).map((item: any) =>
+  function editShipment(row: HistoryRow) {
+    const lines: ShipmentLine[] = (row.items ?? []).map((item) =>
       emptyShipmentLine({
         cropId: item.cropId,
         varietyId: item.varietyId || "",
@@ -809,18 +823,12 @@ export function ProductionRecords({ active }: { active: string }) {
         unitId: item.unitId || item.unit?.id || "",
         quantity: String(item.quantity),
         unitPrice: String(item.estimatedUnitPrice ?? ""),
+        notes: item.notes,
       }),
     );
 
-    const original: Record<string, number> = {};
-    for (const line of lines) {
-      const key = keyOf(line);
-      original[key] = (original[key] ?? 0) + Number(line.quantity || 0);
-    }
-
     setEditingShipmentId(row.id);
     setEditingCode(row.code || "");
-    setOriginalQty(original);
     setFormDate(String(row.date).slice(0, 10));
     setShipmentNotes(row.notes || "");
     setShipmentLines(lines.length > 0 ? lines : [emptyShipmentLine()]);
@@ -830,6 +838,7 @@ export function ProductionRecords({ active }: { active: string }) {
   }
 
   async function saveShipment() {
+    if (saving) return;
     setSaving(true);
     setMessage(null);
 
@@ -843,9 +852,10 @@ export function ProductionRecords({ active }: { active: string }) {
         unitId: lineUnitId(line) || null,
         quantity: line.quantity,
         unitPrice: line.unitPrice,
+        notes: line.notes,
       }));
 
-      const response = await fetch(
+      const data = await productionFetch<{ code: string }>(
         wasEditing ? `/api/shipments/${editingShipmentId}` : "/api/shipments",
         {
           method: wasEditing ? "PATCH" : "POST",
@@ -858,12 +868,6 @@ export function ProductionRecords({ active }: { active: string }) {
         },
       );
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || "No se pudo guardar el envío.");
-      }
-
       setConfirmOpen(false);
       resetShipmentForm();
       setMessage({
@@ -873,9 +877,11 @@ export function ProductionRecords({ active }: { active: string }) {
           : `Envío ${data.code || ""} registrado correctamente.`,
       });
 
-      await Promise.all([mutate(), mutateAvailability()]);
+      if (!wasEditing && page > 1) setPage(1);
+      refreshRecords();
     } catch (error) {
       setConfirmOpen(false);
+      void mutateAvailability();
       setMessage({
         kind: "error",
         text:
@@ -889,27 +895,20 @@ export function ProductionRecords({ active }: { active: string }) {
   }
 
   async function cancelShipment() {
-    if (!shipmentToCancel) return;
+    if (!shipmentToCancel || cancelling) return;
 
     setCancelling(true);
 
     try {
-      // ⚠ PENDIENTE DE CONFIRMAR: endpoint/método real de cancelación.
-      const response = await fetch(`/api/shipments/${shipmentToCancel.id}`, {
+      await productionFetch(`/api/shipments/${shipmentToCancel.id}`, {
         method: "DELETE",
       });
-
-      const data = await response.json().catch(() => ({}));
-
-      if (!response.ok) {
-        throw new Error(data.error || "No se pudo cancelar el envío.");
-      }
 
       if (editingShipmentId === shipmentToCancel.id) resetShipmentForm();
 
       setShipmentToCancel(null);
       setMessage({ kind: "success", text: "Envío cancelado correctamente." });
-      await Promise.all([mutate(), mutateAvailability()]);
+      refreshRecords();
     } catch (error) {
       setShipmentToCancel(null);
       setMessage({
@@ -926,49 +925,58 @@ export function ProductionRecords({ active }: { active: string }) {
 
   /* ---------- Cosechas, mermas y costos ---------- */
 
-  async function submitHarvest(form: HTMLFormElement) {
-    const formData = new FormData(form);
-    const payload: Record<string, unknown> = Object.fromEntries(
-      formData.entries(),
-    );
-
-    payload.cropId = cropId;
-    payload.unitId = unitId || selectedCrop?.unit?.id;
-
-    return fetch("/api/harvests", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+  function resetRecordForm() {
+    formRef.current?.reset();
+    setEditingRecord(null);
+    setLinkedHarvest(null);
+    setLossHarvestId("");
+    setHarvestSearch("");
+    setCropId("");
+    setUnitId("");
+    setCostApplication("GENERAL");
+    setCostCropId("");
+    setFormDate(today());
   }
 
-  async function submitLoss(form: HTMLFormElement) {
-    const formData = new FormData(form);
-    const affectsHarvestValue = formData.get("affectsHarvest");
-
-    const payload = {
-      date: formData.get("date"),
-      harvestId: formData.get("harvestId"),
-      quantity: formData.get("quantity"),
-      reason: formData.get("reason"),
-      notes: formData.get("notes"),
-      affectsHarvest:
-        affectsHarvestValue === null ? null : affectsHarvestValue === "true",
-    };
-
-    return fetch("/api/losses", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+  function editRecord(row: HistoryRow) {
+    setEditingRecord(row);
+    setFormDate(String(row.date).slice(0, 10));
+    setCropId(row.cropId || "");
+    setUnitId(row.unitId || "");
+    setLinkedHarvest(row.harvest ?? null);
+    setLossHarvestId(row.harvestId ?? "");
+    setCostApplication(row.applicationType === "CROP" || row.allocations?.length ? "CROP" : "GENERAL");
+    setCostCropId(row.allocations?.length === 1 ? row.allocations[0].cropId ?? "" : "");
+    setMessage(null);
+    formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
-  async function submitCost(form: HTMLFormElement) {
-    const formData = new FormData(form);
-    const payload = Object.fromEntries(formData.entries());
+  function logLossFor(row: HistoryRow) {
+    resetRecordForm();
+    clearFilters();
+    setHarvestView("mermas");
+    setLinkedHarvest(row);
+    setLossHarvestId(row.id);
+    setFormDate(String(row.date).slice(0, 10) > today() ? String(row.date).slice(0, 10) : today());
+    formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
 
-    return fetch("/api/costs", {
-      method: "POST",
+  async function submitRecord(form: HTMLFormElement) {
+    const payload: Record<string, unknown> = Object.fromEntries(new FormData(form));
+    if (editingRecord) payload.id = editingRecord.id;
+    if (isLosses) {
+      payload.affectsHarvest = payload.affectsHarvest === 'true';
+    } else if (isHarvests) {
+      payload.cropId = cropId;
+    } else if (isCosts && costApplication === 'CROP' && costCropId) {
+      const prior = editingRecord?.allocations?.length === 1 ? editingRecord.allocations[0] : undefined;
+      const amountChanged = prior?.amountUsd != null && Number(prior.amountUsd) !== Number(payload.amountUsd);
+      if (prior?.cropId !== costCropId || amountChanged) {
+        payload.allocations = [{ cropId: costCropId, amountUsd: payload.amountUsd }];
+      }
+    }
+    return productionFetch(endpoint, {
+      method: editingRecord ? "PATCH" : "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
@@ -1026,6 +1034,8 @@ export function ProductionRecords({ active }: { active: string }) {
       { label: "Descripción", value: String(fd.get("description") ?? "") },
       { label: "Categoría", value: String(fd.get("category") ?? "") },
       { label: "Importe", value: formatAmount(fd.get("amountUsd")) },
+      { label: 'Aplicación', value: costApplication === 'GENERAL' ? 'General' :
+        crops.find((crop) => crop.id === costCropId)?.name ?? editingRecord?.allocations?.map((item) => item.crop?.name).filter(Boolean).join(' · ') ?? 'Cultivo' },
     ];
   }
 
@@ -1047,40 +1057,23 @@ export function ProductionRecords({ active }: { active: string }) {
 
   async function confirmSimpleSave() {
     const form = formRef.current;
-    if (!form) return;
+    if (!form || saving) return;
 
     setSaving(true);
     setMessage(null);
 
     try {
-      const response = isLosses
-        ? await submitLoss(form)
-        : isHarvests
-          ? await submitHarvest(form)
-          : await submitCost(form);
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || "No se pudo guardar el registro.");
-      }
+      await submitRecord(form);
 
       setSimpleConfirm(null);
       setMessage({
         kind: "success",
-        text: isLosses
-          ? "Merma registrada correctamente."
-          : isHarvests
-            ? "Cosecha registrada correctamente."
-            : "Costo registrado correctamente.",
+        text: editingRecord ? "Cambios guardados." : "Registro guardado.",
       });
 
-      form.reset();
-      setCropId("");
-      setUnitId("");
-      setFormDate(today());
-
-      await mutate();
+      resetRecordForm();
+      if (!editingRecord && page > 1) setPage(1);
+      refreshRecords();
     } catch (error) {
       setSimpleConfirm(null);
       setMessage({
@@ -1152,7 +1145,7 @@ export function ProductionRecords({ active }: { active: string }) {
 
       {isHarvests && (
         <div
-          role="tablist"
+          role="group"
           aria-label="Vista de producción"
           className="grid grid-cols-2 gap-1.5 rounded-2xl border border-emerald-900/10 bg-emerald-50/60 p-1.5 dark:border-emerald-100/10 dark:bg-emerald-950/20 xl:col-span-2"
         >
@@ -1165,9 +1158,13 @@ export function ProductionRecords({ active }: { active: string }) {
             <button
               key={id}
               type="button"
-              role="tab"
-              aria-selected={harvestView === id}
-              onClick={() => setHarvestView(id)}
+              aria-pressed={harvestView === id}
+              onClick={() => {
+                if (harvestView === id) return;
+                resetRecordForm();
+                clearFilters();
+                setHarvestView(id);
+              }}
               className={`inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition ${
                 harvestView === id
                   ? "bg-emerald-700 text-white shadow-sm"
@@ -1183,6 +1180,7 @@ export function ProductionRecords({ active }: { active: string }) {
 
       {/* ─────────── Formulario ─────────── */}
       <form
+        key={`${endpoint}:${editingRecord?.id ?? 'new'}`}
         ref={formRef}
         onSubmit={submit}
         className={`${card} scroll-mt-24 overflow-hidden`}
@@ -1191,18 +1189,18 @@ export function ProductionRecords({ active }: { active: string }) {
           <IconBadge icon={ViewIcon} />
           <div className="min-w-0">
             <h3 className="truncate text-lg font-semibold leading-tight">
-              {view.title}
+              {editingRecord ? (isLosses ? 'Editar merma' : isHarvests ? 'Editar cosecha' : 'Editar costo') : view.title}
             </h3>
             <p className="text-xs text-muted-foreground">{view.subtitle}</p>
           </div>
         </header>
 
         <div className="p-5">
-          {isShipments && editingShipmentId && (
+          {(editingShipmentId || editingRecord) && (
             <div className="mb-5 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-300/70 bg-amber-50 px-3 py-2.5 text-xs text-amber-900 dark:border-amber-500/30 dark:bg-amber-950/30 dark:text-amber-200">
               <span className="inline-flex items-center gap-2">
                 <Info className="size-4 shrink-0" />
-                Estás modificando un envío ya registrado.
+                Estás modificando un registro del historial.
               </span>
               <button
                 type="button"
@@ -1213,6 +1211,12 @@ export function ProductionRecords({ active }: { active: string }) {
                 Cancelar edición
               </button>
             </div>
+          )}
+
+          {(cropsError || unitsError || harvestOptionsError) && (
+            <p role="alert" className="mb-4 rounded-xl bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950/30 dark:text-red-300">
+              {(cropsError || unitsError || harvestOptionsError).message}
+            </p>
           )}
 
           <div className="grid gap-4">
@@ -1232,8 +1236,15 @@ export function ProductionRecords({ active }: { active: string }) {
 
             {isLosses && (
               <>
+                <Field label="Buscar cosecha" hint="Busca por cultivo, variedad o lote.">
+                  <input type="search" value={harvestSearch} onChange={(event) => setHarvestSearch(event.target.value)} className={inputCls} />
+                </Field>
                 <Field label="Cosecha asociada">
-                  <select required name="harvestId" className={inputCls}>
+                  <select required name="harvestId" value={lossHarvestId} onChange={(event) => {
+                    const harvest = harvestOptions.find((item) => item.id === event.target.value);
+                    setLossHarvestId(event.target.value);
+                    setLinkedHarvest(harvest ?? null);
+                  }} className={inputCls}>
                     <option value="">Seleccionar cosecha</option>
                     {harvestOptions.map((harvest) => (
                       <option key={harvest.id} value={harvest.id}>
@@ -1252,6 +1263,7 @@ export function ProductionRecords({ active }: { active: string }) {
                     step="0.01"
                     type="number"
                     name="quantity"
+                    defaultValue={editingRecord?.quantity ?? ''}
                     className={inputCls}
                   />
                 </Field>
@@ -1282,6 +1294,7 @@ export function ProductionRecords({ active }: { active: string }) {
                         type="radio"
                         name="affectsHarvest"
                         value={option.value}
+                        defaultChecked={typeof editingRecord?.affectsHarvest === 'boolean' && String(editingRecord.affectsHarvest) === option.value}
                         className="mt-1 accent-emerald-700"
                       />
                       <span>
@@ -1298,13 +1311,15 @@ export function ProductionRecords({ active }: { active: string }) {
                   <input
                     required
                     name="reason"
+                    defaultValue={editingRecord?.reason?.name ?? ''}
+                    maxLength={120}
                     placeholder="Ej. producto dañado"
                     className={inputCls}
                   />
                 </Field>
 
                 <Field label="Observaciones">
-                  <textarea name="notes" rows={2} className={inputCls} />
+                  <textarea name="notes" rows={2} maxLength={2000} defaultValue={editingRecord?.notes ?? ''} className={inputCls} />
                 </Field>
               </>
             )}
@@ -1322,6 +1337,9 @@ export function ProductionRecords({ active }: { active: string }) {
                     className={inputCls}
                   >
                     <option value="">Seleccionar cultivo</option>
+                    {selectedCrop && !crops.some((crop) => crop.id === cropId) && (
+                      <option value={cropId}>{selectedCrop.name}</option>
+                    )}
                     {crops.map((crop) => (
                       <option key={crop.id} value={crop.id}>
                         {crop.name}
@@ -1330,13 +1348,16 @@ export function ProductionRecords({ active }: { active: string }) {
                   </select>
                 </Field>
 
-                {((selectedCrop?.varieties?.length ?? 0) > 0 ||
-                  (selectedCrop?.productionAreas?.length ?? 0) > 0) && (
-                  <div className={`${innerBox} grid gap-4 p-3`}>
-                    {(selectedCrop?.varieties?.length ?? 0) > 0 && (
+                {((selectedCrop?.varieties?.length ?? 0) > 0 || (editingRecord?.cropId === cropId && editingRecord?.varietyId) ||
+                  (selectedCrop?.productionAreas?.length ?? 0) > 0 || (editingRecord?.cropId === cropId && editingRecord?.productionAreaId)) && (
+                  <div key={cropId} className={`${innerBox} grid gap-4 p-3`}>
+                    {((selectedCrop?.varieties?.length ?? 0) > 0 || (editingRecord?.cropId === cropId && editingRecord?.varietyId)) && (
                       <Field label="Variedad">
-                        <select name="varietyId" className={inputCls}>
+                        <select name="varietyId" defaultValue={editingRecord?.cropId === cropId ? editingRecord?.varietyId ?? '' : ''} className={inputCls}>
                           <option value="">Sin especificar</option>
+                          {editingRecord?.cropId === cropId && editingRecord?.varietyId && !selectedCrop?.varieties?.some((item) => item.id === editingRecord.varietyId) && (
+                            <option value={editingRecord.varietyId}>{editingRecord.variety?.name ?? 'Variedad registrada'}</option>
+                          )}
                           {selectedCrop?.varieties?.map((variety) => (
                             <option key={variety.id} value={variety.id}>
                               {variety.name}
@@ -1346,10 +1367,13 @@ export function ProductionRecords({ active }: { active: string }) {
                       </Field>
                     )}
 
-                    {(selectedCrop?.productionAreas?.length ?? 0) > 0 && (
+                    {((selectedCrop?.productionAreas?.length ?? 0) > 0 || (editingRecord?.cropId === cropId && editingRecord?.productionAreaId)) && (
                       <Field label="Lote o zona">
-                        <select name="productionAreaId" className={inputCls}>
+                        <select name="productionAreaId" defaultValue={editingRecord?.cropId === cropId ? editingRecord?.productionAreaId ?? '' : ''} className={inputCls}>
                           <option value="">Sin especificar</option>
+                          {editingRecord?.cropId === cropId && editingRecord?.productionAreaId && !selectedCrop?.productionAreas?.some((item) => item.id === editingRecord.productionAreaId) && (
+                            <option value={editingRecord.productionAreaId}>{editingRecord.productionArea?.name ?? 'Área registrada'}</option>
+                          )}
                           {selectedCrop?.productionAreas?.map((area) => (
                             <option key={area.id} value={area.id}>
                               {area.name}
@@ -1369,6 +1393,7 @@ export function ProductionRecords({ active }: { active: string }) {
                       step="0.01"
                       type="number"
                       name="quantity"
+                      defaultValue={editingRecord?.quantity ?? ''}
                       className={inputCls}
                     />
                   </Field>
@@ -1382,6 +1407,9 @@ export function ProductionRecords({ active }: { active: string }) {
                       className={inputCls}
                     >
                       <option value="">Seleccionar unidad</option>
+                      {editingRecord?.unit?.id === unitId && !units.some((unit) => unit.id === unitId) && (
+                        <option value={unitId}>{editingRecord.unit.name}</option>
+                      )}
                       {units.map((unit) => (
                         <option key={unit.id} value={unit.id}>
                           {unit.name}
@@ -1400,13 +1428,14 @@ export function ProductionRecords({ active }: { active: string }) {
                     step="0.01"
                     type="number"
                     name="estimatedUnitPrice"
+                    defaultValue={editingRecord?.estimatedUnitPrice ?? ''}
                     placeholder="Opcional"
                     className={inputCls}
                   />
                 </Field>
 
                 <Field label="Observaciones de la cosecha">
-                  <textarea name="notes" rows={2} className={inputCls} />
+                  <textarea name="notes" rows={2} maxLength={2000} defaultValue={editingRecord?.notes ?? ''} className={inputCls} />
                 </Field>
               </>
             )}
@@ -1417,6 +1446,8 @@ export function ProductionRecords({ active }: { active: string }) {
                   <input
                     required
                     name="description"
+                    defaultValue={editingRecord?.description ?? ''}
+                    maxLength={200}
                     placeholder="Ej. compra de fertilizantes"
                     className={inputCls}
                   />
@@ -1426,6 +1457,8 @@ export function ProductionRecords({ active }: { active: string }) {
                   <input
                     required
                     name="category"
+                    defaultValue={editingRecord?.category?.name ?? ''}
+                    maxLength={120}
                     placeholder="Ej. insumos, transporte, mano de obra"
                     className={inputCls}
                   />
@@ -1439,6 +1472,7 @@ export function ProductionRecords({ active }: { active: string }) {
                       step="0.01"
                       type="number"
                       name="amountUsd"
+                      defaultValue={editingRecord?.amountUsd ?? ''}
                       className={inputCls}
                     />
                   </Field>
@@ -1446,7 +1480,8 @@ export function ProductionRecords({ active }: { active: string }) {
                   <Field label="Aplicación">
                     <select
                       name="applicationType"
-                      defaultValue="GENERAL"
+                      value={costApplication}
+                      onChange={(event) => setCostApplication(event.target.value)}
                       className={inputCls}
                     >
                       <option value="GENERAL">General</option>
@@ -1455,8 +1490,20 @@ export function ProductionRecords({ active }: { active: string }) {
                   </Field>
                 </div>
 
+                {costApplication === 'CROP' && (
+                  <Field label="Cultivo del costo">
+                    <select name="costCropId" required={(editingRecord?.allocations?.length ?? 0) <= 1} value={costCropId} onChange={(event) => setCostCropId(event.target.value)} className={inputCls}>
+                      <option value="">{(editingRecord?.allocations?.length ?? 0) > 1 ? 'Conservar distribución actual' : 'Seleccionar cultivo'}</option>
+                      {editingRecord?.allocations?.length === 1 && editingRecord.allocations[0].crop?.id === costCropId && !crops.some((crop) => crop.id === costCropId) && (
+                        <option value={costCropId}>{editingRecord.allocations[0].crop.name}</option>
+                      )}
+                      {crops.map((crop) => <option key={crop.id} value={crop.id}>{crop.name}</option>)}
+                    </select>
+                  </Field>
+                )}
+
                 <Field label="Observaciones">
-                  <textarea name="notes" rows={2} className={inputCls} />
+                  <textarea name="notes" rows={2} maxLength={2000} defaultValue={editingRecord?.notes ?? ''} className={inputCls} />
                 </Field>
               </>
             )}
@@ -1472,8 +1519,8 @@ export function ProductionRecords({ active }: { active: string }) {
                     action={
                       <button
                         type="button"
-                        onClick={prepareAllAvailableHarvests}
-                        disabled={availableStock.length === 0}
+                        onClick={() => prepareAllAvailableHarvests()}
+                        disabled={availableStock.length === 0 || availabilityLoading || Boolean(availabilityError)}
                         className={`${btnBase} bg-emerald-700 px-3 py-2 text-xs text-white hover:bg-emerald-800`}
                       >
                         <Plus className="size-4" />
@@ -1537,8 +1584,10 @@ export function ProductionRecords({ active }: { active: string }) {
                               <button
                                 type="button"
                                 onClick={() => addStockLine(item)}
+                                disabled={shipmentLines.some((line) => keyOf(line) === stockKey(item.cropId, item.varietyId, item.productionAreaId, item.unitId)) ||
+                                  (shipmentLines.length >= 100 && shipmentLines.every(lineHasData))}
                                 aria-label={`Agregar ${title} al envío`}
-                                className="rounded-md border border-border p-1.5 transition hover:border-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/30"
+                                className="rounded-md border border-border p-1.5 transition hover:border-emerald-600 hover:bg-emerald-50 disabled:opacity-50 dark:hover:bg-emerald-950/30"
                               >
                                 <Plus className="size-3.5" />
                               </button>
@@ -1558,6 +1607,7 @@ export function ProductionRecords({ active }: { active: string }) {
                     <button
                       type="button"
                       onClick={addShipmentLine}
+                      disabled={shipmentLines.length >= 100}
                       className={btnSmall}
                     >
                       <Plus className="size-4" />
@@ -1628,10 +1678,10 @@ export function ProductionRecords({ active }: { active: string }) {
                           </select>
                         </label>
 
-                        {((crop?.varieties?.length ?? 0) > 0 ||
-                          (crop?.productionAreas?.length ?? 0) > 0) && (
+                        {((crop?.varieties?.length ?? 0) > 0 || line.varietyId ||
+                          (crop?.productionAreas?.length ?? 0) > 0 || line.productionAreaId) && (
                           <div className="grid gap-3 sm:grid-cols-2">
-                            {(crop?.varieties?.length ?? 0) > 0 && (
+                            {((crop?.varieties?.length ?? 0) > 0 || line.varietyId) && (
                               <label className="grid gap-1 text-xs font-medium">
                                 Variedad
                                 <select
@@ -1644,6 +1694,9 @@ export function ProductionRecords({ active }: { active: string }) {
                                   className={inputCls}
                                 >
                                   <option value="">Sin especificar</option>
+                                  {line.varietyId && !crop?.varieties?.some((item) => item.id === line.varietyId) && (
+                                    <option value={line.varietyId}>{stock?.varietyName ?? 'Variedad registrada'}</option>
+                                  )}
                                   {crop?.varieties?.map((item) => (
                                     <option key={item.id} value={item.id}>
                                       {item.name}
@@ -1653,7 +1706,7 @@ export function ProductionRecords({ active }: { active: string }) {
                               </label>
                             )}
 
-                            {(crop?.productionAreas?.length ?? 0) > 0 && (
+                            {((crop?.productionAreas?.length ?? 0) > 0 || line.productionAreaId) && (
                               <label className="grid gap-1 text-xs font-medium">
                                 Lote o zona
                                 <select
@@ -1666,6 +1719,9 @@ export function ProductionRecords({ active }: { active: string }) {
                                   className={inputCls}
                                 >
                                   <option value="">Sin especificar</option>
+                                  {line.productionAreaId && !crop?.productionAreas?.some((item) => item.id === line.productionAreaId) && (
+                                    <option value={line.productionAreaId}>{stock?.productionAreaName ?? 'Área registrada'}</option>
+                                  )}
                                   {crop?.productionAreas?.map((item) => (
                                     <option key={item.id} value={item.id}>
                                       {item.name}
@@ -1799,6 +1855,7 @@ export function ProductionRecords({ active }: { active: string }) {
                 <Field label="Observaciones generales del envío">
                   <textarea
                     name="notes"
+                    maxLength={2000}
                     rows={2}
                     value={shipmentNotes}
                     onChange={(event) => setShipmentNotes(event.target.value)}
@@ -1830,23 +1887,13 @@ export function ProductionRecords({ active }: { active: string }) {
 
           <button
             type="submit"
-            disabled={saving || (isShipments && !shipmentCheck.canSubmit)}
+            disabled={saving || Boolean(cropsError || unitsError || harvestOptionsError) || (isShipments && !shipmentCheck.canSubmit)}
             className={`${btnPrimary} mt-5 w-full`}
           >
             {saving && <Loader2 className="size-4 animate-spin" />}
-            {saving ? "Guardando..." : view.cta}
+            {saving ? "Guardando…" : editingRecord ? 'Revisar y guardar cambios' : view.cta}
           </button>
 
-          {isShipments && editingShipmentId && (
-            <button
-              type="button"
-              disabled={saving}
-              onClick={() => setDiscardOpen(true)}
-              className={`${btnOutline} mt-2 w-full`}
-            >
-              Cancelar edición
-            </button>
-          )}
         </div>
       </form>
 
@@ -1862,7 +1909,7 @@ export function ProductionRecords({ active }: { active: string }) {
               <p className="text-xs text-muted-foreground">
                 {rowsLoading
                   ? "Cargando…"
-                  : `${visibleRows.length} de ${rows.length} registro(s)`}
+                  : `Página ${page} · ${visibleRows.length} registro(s)`}
               </p>
             </div>
           </div>
@@ -1883,7 +1930,7 @@ export function ProductionRecords({ active }: { active: string }) {
                 <input
                   type="date"
                   value={from}
-                  onChange={(event) => setFrom(event.target.value)}
+                  onChange={(event) => { setPage(1); setFrom(event.target.value); }}
                   className={`${inputCls} text-foreground`}
                 />
               </label>
@@ -1894,7 +1941,7 @@ export function ProductionRecords({ active }: { active: string }) {
                   type="date"
                   value={to}
                   min={from || undefined}
-                  onChange={(event) => setTo(event.target.value)}
+                  onChange={(event) => { setPage(1); setTo(event.target.value); }}
                   className={`${inputCls} text-foreground`}
                 />
               </label>
@@ -1905,7 +1952,7 @@ export function ProductionRecords({ active }: { active: string }) {
                 Filtrar por cultivo
                 <select
                   value={filterCropId}
-                  onChange={(event) => setFilterCropId(event.target.value)}
+                  onChange={(event) => { setPage(1); setFilterCropId(event.target.value); }}
                   className={`${inputCls} text-foreground`}
                 >
                   <option value="">Todos los cultivos</option>
@@ -1923,7 +1970,8 @@ export function ProductionRecords({ active }: { active: string }) {
               <input
                 aria-label="Buscar registros"
                 value={search}
-                onChange={(event) => setSearch(event.target.value)}
+                maxLength={120}
+                onChange={(event) => { setPage(1); setSearch(event.target.value); }}
                 placeholder="Buscar en el historial"
                 className={`${inputCls} pl-9`}
               />
@@ -1931,9 +1979,10 @@ export function ProductionRecords({ active }: { active: string }) {
           </div>
 
           {loadError && (
-            <p className="mt-4 flex items-center gap-2 rounded-xl bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950/30 dark:text-red-300">
+            <p role="alert" className="mt-4 flex items-center gap-2 rounded-xl bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950/30 dark:text-red-300">
               <TriangleAlert className="size-4 shrink-0" />
               {loadError.message}
+              <button type="button" className="ml-auto underline" onClick={() => void mutate()}>Reintentar</button>
             </p>
           )}
 
@@ -1945,18 +1994,19 @@ export function ProductionRecords({ active }: { active: string }) {
                   className="h-28 animate-pulse rounded-xl bg-muted"
                 />
               ))
-            ) : visibleRows.length > 0 ? (
+            ) : loadError ? null : visibleRows.length > 0 ? (
               visibleRows.map((row) => (
                 <HistoryCard
                   key={row.id}
                   row={row}
                   active={isLosses ? "mermas" : active}
-                  isBeingEdited={isShipments && row.id === editingShipmentId}
-                  onEdit={isShipments ? () => editShipment(row) : undefined}
+                  isBeingEdited={row.id === (isShipments ? editingShipmentId : editingRecord?.id)}
+                  onEdit={() => isShipments ? editShipment(row) : editRecord(row)}
                   onCancel={
                     isShipments ? () => setShipmentToCancel(row) : undefined
                   }
-                  onDelete={isLosses ? () => setLossToDelete(row) : undefined}
+                  onDelete={!isShipments ? () => setRecordToDelete(row) : undefined}
+                  onLogLoss={isHarvests && !isLosses ? () => logLossFor(row) : undefined}
                 />
               ))
             ) : (
@@ -1980,6 +2030,12 @@ export function ProductionRecords({ active }: { active: string }) {
             )}
           </div>
         </div>
+          {(page > 1 || history?.hasNext) && (
+            <nav aria-label="Páginas del historial" className="flex items-center justify-between gap-2 px-5 pb-5">
+              <button type="button" className={btnSmall} disabled={page <= 1 || rowsLoading} onClick={() => setPage(page - 1)}>Anterior</button>
+              <button type="button" className={btnSmall} disabled={!history?.hasNext || rowsLoading} onClick={() => setPage(page + 1)}>Siguiente</button>
+            </nav>
+          )}
       </section>
 
       {/* ─────────── Confirmaciones ─────────── */}
@@ -2031,8 +2087,7 @@ export function ProductionRecords({ active }: { active: string }) {
             const area = crop?.productionAreas?.find(
               (item) => item.id === line.productionAreaId,
             )?.name;
-            const subtotal =
-              Number(line.quantity || 0) * Number(line.unitPrice || 0);
+            const subtotal = shipmentSubtotal(line);
 
             return (
               <li
@@ -2092,36 +2147,25 @@ export function ProductionRecords({ active }: { active: string }) {
         </p>
       </ConfirmDialog>
 
-      {/* Eliminar merma */}
       <ConfirmDialog
-        open={lossToDelete !== null}
-        title="Eliminar merma"
-        description="La merma se enviará a la papelera."
+        open={recordToDelete !== null}
+        title={isLosses ? 'Eliminar merma' : isHarvests ? 'Eliminar cosecha' : 'Eliminar costo'}
+        description={isHarvests && !isLosses ? 'La cosecha y sus mermas asociadas se enviarán a la papelera.' : 'El registro se enviará a la papelera.'}
         icon={Trash2}
         confirmLabel="Sí, eliminar"
         tone="danger"
-        loading={deletingLoss}
-        onConfirm={deleteLoss}
-        onClose={() => setLossToDelete(null)}
+        loading={deletingRecord}
+        onConfirm={deleteRecord}
+        onClose={() => setRecordToDelete(null)}
       >
-        {lossToDelete && (
+        {recordToDelete && (
           <SummaryList
             rows={[
               {
-                label: "Cultivo",
-                value: lossToDelete.harvest?.crop?.name || "Cultivo",
+                label: "Registro",
+                value: recordToDelete.harvest?.crop?.name || recordToDelete.crop?.name || recordToDelete.description || 'Registro',
               },
-              { label: "Fecha", value: formatDate(lossToDelete.date) },
-              {
-                label: "Cantidad",
-                value: `${Number(lossToDelete.quantity || 0).toFixed(2)} ${
-                  lossToDelete.harvest?.unit?.name || ""
-                }`.trim(),
-              },
-              {
-                label: "Motivo",
-                value: lossToDelete.reason?.name || "Sin motivo",
-              },
+              { label: "Fecha", value: formatDate(recordToDelete.date) },
             ]}
           />
         )}
@@ -2136,7 +2180,8 @@ export function ProductionRecords({ active }: { active: string }) {
         confirmLabel="Sí, descartar cambios"
         cancelLabel="Seguir editando"
         onConfirm={() => {
-          resetShipmentForm();
+          if (isShipments) resetShipmentForm();
+          else resetRecordForm();
           setMessage(null);
           setDiscardOpen(false);
         }}
@@ -2147,11 +2192,11 @@ export function ProductionRecords({ active }: { active: string }) {
       <ConfirmDialog
         open={prepareOpen}
         title="Reemplazar productos"
-        description={`Se cargarán ${availableStock.length} producto(s) con todas las existencias y se reemplazará lo que ya escribiste.`}
+        description="Se reemplazarán los productos del envío con todas las existencias y sus precios estimados."
         tone="warning"
         icon={Package}
         confirmLabel="Sí, reemplazar"
-        onConfirm={applyPrepareAll}
+        onConfirm={() => prepareAllAvailableHarvests(true)}
         onClose={() => setPrepareOpen(false)}
       />
 
@@ -2291,14 +2336,24 @@ function HistoryCard({
   onDelete,
   onEdit,
   onCancel,
+  onLogLoss,
 }: {
-  row: any;
+  row: HistoryRow;
   active: string;
   isBeingEdited?: boolean;
   onDelete?: () => void;
   onEdit?: () => void;
   onCancel?: () => void;
+  onLogLoss?: () => void;
 }) {
+  const actions = (onEdit || onDelete || onLogLoss) && (
+    <div className="mt-3 flex flex-wrap justify-end gap-2 border-t border-border/70 pt-3">
+      {onLogLoss && <button type="button" onClick={onLogLoss} className={btnSmall}><Plus className="size-3.5" /> Registrar merma</button>}
+      {onEdit && <button type="button" onClick={onEdit} className={btnSmall}><Pencil className="size-3.5" /> Editar</button>}
+      {onDelete && <button type="button" onClick={onDelete} className={`${btnSmall} text-red-700 dark:text-red-300`}><Trash2 className="size-3.5" /> Eliminar</button>}
+    </div>
+  );
+
   if (active === "mermas") {
     const harvest = row.harvest;
     const unit = harvest?.unit?.name || "";
@@ -2312,6 +2367,7 @@ function HistoryCard({
           harvest?.productionArea?.name || "Sin lote o zona"
         }`}
         date={row.date}
+        highlighted={isBeingEdited}
       >
         <div className="grid grid-cols-2 gap-2">
           <Stat
@@ -2341,18 +2397,7 @@ function HistoryCard({
           </p>
         )}
 
-        {onDelete && (
-          <div className="mt-3 flex justify-end border-t border-border/70 pt-3">
-            <button
-              type="button"
-              onClick={onDelete}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-2 text-xs font-semibold text-red-700 transition hover:bg-red-50 dark:border-red-900 dark:text-red-300 dark:hover:bg-red-950/30"
-            >
-              <Trash2 className="size-3.5" />
-              Eliminar merma
-            </button>
-          </div>
-        )}
+        {actions}
       </CardShell>
     );
   }
@@ -2362,13 +2407,13 @@ function HistoryCard({
     const unit = row.unit?.name || "";
 
     const lossTotal = losses.reduce(
-      (sum: number, loss: any) => sum + Number(loss.quantity || 0),
+      (sum, loss) => sum + Number(loss.quantity || 0),
       0,
     );
 
     const affectingLossTotal = losses
-      .filter((loss: any) => loss.affectsHarvest === true)
-      .reduce((sum: number, loss: any) => sum + Number(loss.quantity || 0), 0);
+      .filter((loss) => loss.affectsHarvest === true)
+      .reduce((sum, loss) => sum + Number(loss.quantity || 0), 0);
 
     const usefulProduction = Math.max(
       0,
@@ -2383,6 +2428,7 @@ function HistoryCard({
           row.productionArea?.name || "Sin lote o zona"
         }`}
         date={row.date}
+        highlighted={isBeingEdited}
       >
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
           <Stat
@@ -2419,7 +2465,7 @@ function HistoryCard({
               Mermas asociadas ({losses.length})
             </p>
             <div className="grid gap-2">
-              {losses.map((loss: any) => (
+              {losses.map((loss) => (
                 <div
                   key={loss.id}
                   className="grid gap-1.5 rounded-lg border-l-4 border-red-300 bg-muted/40 px-3 py-2 text-xs dark:border-red-800"
@@ -2454,6 +2500,7 @@ function HistoryCard({
             {row.notes}
           </p>
         )}
+        {actions}
       </CardShell>
     );
   }
@@ -2461,11 +2508,18 @@ function HistoryCard({
   if (active === "envios") {
     const items = row.items || [];
     const receptionsCount: number = row.receptions?.length ?? 0;
+    const receipts = row.receptions?.flatMap((receipt) => receipt.receiptNumber === undefined ? [] : [receiptCode(receipt.receiptNumber)]) ?? [];
     const isCancelled = row.status === "CANCELLED";
-    const canModify = !isCancelled && receptionsCount === 0;
+    const canModify = editableShipmentStatuses.includes(row.status ?? '') && receptionsCount === 0;
+    const receivedByItem = new Map<string, number>();
+    for (const reception of row.receptions ?? []) {
+      for (const item of reception.items ?? []) {
+        receivedByItem.set(item.shipmentItemId, (receivedByItem.get(item.shipmentItemId) ?? 0) + Number(item.receivedQuantity));
+      }
+    }
 
     const total = items.reduce(
-      (sum: number, item: any) =>
+      (sum, item) =>
         sum +
         Number(
           item.estimatedTotalAmount ??
@@ -2487,19 +2541,19 @@ function HistoryCard({
         date={row.date}
         highlighted={isBeingEdited}
         badge={
-          <Chip tone={isCancelled ? "danger" : "success"}>
-            {isCancelled ? "Cancelado" : row.status || "Registrado"}
+          <Chip tone={isCancelled ? "danger" : row.status === 'RECEIVED' ? 'success' : 'warning'}>
+            {shipmentStatusLabels[row.status ?? ''] ?? 'Registrado'}
           </Chip>
         }
       >
         <div className="grid gap-2">
-          {items.map((item: any) => (
+          {items.map((item) => (
             <div
               key={item.id}
               className="rounded-lg border border-border/60 bg-muted/30 px-3 py-2"
             >
-              <div className="flex justify-between gap-3">
-                <span className="font-medium">
+              <div className="flex flex-wrap justify-between gap-2">
+                <span className="min-w-0 break-words font-medium">
                   {item.crop?.name || "Cultivo"}
                   {item.variety?.name ? ` · ${item.variety.name}` : ""}
                 </span>
@@ -2509,8 +2563,13 @@ function HistoryCard({
               </div>
               <p className="mt-1 text-xs text-muted-foreground">
                 {item.productionArea?.name || "Sin lote"} · Precio:{" "}
-                {formatAmount(item.estimatedUnitPrice)}
+                {item.estimatedUnitPrice == null ? 'Sin estimar' : formatAmount(item.estimatedUnitPrice)}
               </p>
+              {receptionsCount > 0 && (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Recibido {Number(receivedByItem.get(item.id) ?? 0).toFixed(2)} · Pendiente {Math.max(0, Number(item.quantity) - (receivedByItem.get(item.id) ?? 0)).toFixed(2)} {item.unit?.name}
+                </p>
+              )}
             </div>
           ))}
         </div>
@@ -2525,8 +2584,7 @@ function HistoryCard({
         {receptionsCount > 0 && (
           <p className="mt-3 flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
             <Info className="mt-0.5 size-3.5 shrink-0" />
-            Recepciones registradas: {receptionsCount}. Este envío ya no puede
-            editarse ni cancelarse.
+            {receptionsCount === 1 ? '1 recepción registrada' : `${receptionsCount} recepciones registradas`} en Agro Market{receipts.length ? ` · ${receipts.join(' · ')}` : ''}.
           </p>
         )}
 
@@ -2566,92 +2624,118 @@ function HistoryCard({
       title={row.description || "Costo"}
       subtitle={row.category?.name || "Sin categoría"}
       date={row.date}
+      highlighted={isBeingEdited}
     >
       <div className="flex items-center justify-between rounded-lg bg-muted/40 px-3 py-2.5">
         <span className="text-xs text-muted-foreground">Importe</span>
         <strong className="text-base">{formatAmount(row.amountUsd)}</strong>
       </div>
+      <p className="mt-3 text-xs text-muted-foreground">
+        {row.allocations?.length ? row.allocations.map((item) => item.crop?.name ?? 'Cultivo').join(' · ') : row.applicationType === 'CROP' ? 'Cultivo sin asignar' : 'Costo general'}
+      </p>
       {row.notes && (
         <p className="mt-3 rounded-lg bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
           {row.notes}
         </p>
       )}
+      {actions}
     </CardShell>
   );
 }
 
 /* ───────────────────── Resumen de producción ───────────────────── */
 
-export function ProductionSummary() {
-  const { data, error } = useSWR<any>("/api/production-summary", fetcher);
+type Summary = {
+  harvests: { _count: number };
+  losses: { _count: number };
+  costs: { _sum: { amountUsd: string | null } };
+  shipments: { _count: number; pending: number; received: number };
+  units: { unitId: string; unitName: string; harvested: string; losses: string; useful: string; shipped: string }[];
+};
 
-  const cards: {
-    label: string;
-    value: string | number;
-    icon: ElementType;
-    tone: string;
-  }[] = [
+const quantityFormat = new Intl.NumberFormat('es-EC', { maximumFractionDigits: 2 });
+
+export function ProductionSummary() {
+  const { data, error, mutate } = useSWR<Summary>("/api/production-summary", fetcher);
+  const cards = [
+    { label: "Cosechas", value: data?.harvests._count, icon: Sprout, note: "Cosechas registradas" },
+    { label: "Mermas", value: data?.losses._count, icon: TrendingDown, note: "Mermas registradas" },
+    { label: "Costos", value: data ? formatAmount(data.costs._sum.amountUsd) : undefined, icon: Wallet, note: "Gastos registrados" },
     {
-      label: "Cosechas",
-      value: data?.harvests?._count ?? 0,
-      icon: Sprout,
-      tone: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
-    },
-    {
-      label: "Producción útil",
-      value: Number(data?.usefulProduction ?? 0).toFixed(2),
-      icon: Package,
-      tone: "bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300",
-    },
-    {
-      label: "Mermas",
-      value: data?.losses?._count ?? 0,
-      icon: TrendingDown,
-      tone: "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300",
-    },
-    {
-      label: "Costos",
-      value: formatAmount(data?.costs?._sum?.amountUsd),
-      icon: Wallet,
-      tone: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
-    },
-    {
-      label: "Envíos",
-      value: data?.shipments?._count ?? 0,
-      icon: Truck,
-      tone: "bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300",
+      label: "Envíos vigentes", value: data?.shipments._count, icon: Truck,
+      note: data ? `${data.shipments.pending} pendientes de recepción · ${data.shipments.received} recibidos` : undefined,
     },
   ];
 
   return (
-    <section className="mt-8">
+    <section className="grid gap-5" aria-busy={!data && !error}>
       {error && (
-        <p className="mb-4 flex items-center gap-2 rounded-xl bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950/30 dark:text-red-300">
+        <div role="alert" className="flex items-center gap-2 rounded-xl bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950/30 dark:text-red-300">
           <TriangleAlert className="size-4 shrink-0" />
-          No se pudo cargar el resumen.
-        </p>
+          {error.message}
+          <button type="button" className="ml-auto underline" onClick={() => void mutate()}>Reintentar</button>
+        </div>
       )}
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-        {cards.map(({ label, value, icon, tone }) => (
-          <div key={label} className={`${card} p-5`}>
-            <div className="flex items-center justify-between gap-3">
-              <p className="text-sm font-medium text-muted-foreground">
-                {label}
-              </p>
-              <IconBadge icon={icon} className={tone} />
+      {(data || !error) && (
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {cards.map(({ label, value, icon, note }) => (
+            <div key={label} className={`${card} p-5`}>
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm font-medium text-muted-foreground">{label}</p>
+                <IconBadge icon={icon} />
+              </div>
+              {data ? (
+                <>
+                  <p className="mt-4 text-2xl font-semibold tabular-nums">{value}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">{note}</p>
+                </>
+              ) : (
+                <div className="mt-4 h-8 w-20 animate-pulse rounded-md bg-muted" />
+              )}
             </div>
-            {data ? (
-              <p className="mt-4 text-2xl font-semibold">{value}</p>
-            ) : (
-              <div className="mt-4 h-8 w-20 animate-pulse rounded-md bg-muted" />
-            )}
-            <p className="mt-1 text-xs text-muted-foreground">
-              {data ? "Datos confirmados en PostgreSQL" : "Cargando datos…"}
-            </p>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
+
+      {data && (
+        <section className={`${card} overflow-hidden`} aria-labelledby="production-unit-totals">
+          <header className="flex items-center gap-3 border-b border-border/60 bg-emerald-50/50 p-5 dark:bg-emerald-950/20">
+            <IconBadge icon={Package} />
+            <div>
+              <h3 id="production-unit-totals" className="text-lg font-semibold">Producción por unidad</h3>
+              <p className="text-xs text-muted-foreground">La producción útil descuenta las mermas que afectan al inventario.</p>
+            </div>
+          </header>
+          {data.units.length ? (
+            <div className="overflow-x-auto" tabIndex={0} aria-label="Totales por unidad">
+              <table className="w-full min-w-[540px] text-sm">
+                <thead className="bg-muted/40 text-muted-foreground">
+                  <tr>
+                    {['Unidad', 'Cosechada', 'Mermas', 'Útil', 'Enviada'].map((label, index) => (
+                      <th key={label} scope="col" className={`px-5 py-3 font-medium ${index ? 'text-right' : 'text-left'}`}>{label}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border/60">
+                  {data.units.map((unit) => (
+                    <tr key={unit.unitId}>
+                      <th scope="row" className="px-5 py-3 text-left font-medium">{unit.unitName}</th>
+                      {[unit.harvested, unit.losses, unit.useful, unit.shipped].map((value, index) => (
+                        <td key={index} className={`px-5 py-3 text-right tabular-nums ${index === 2 ? 'font-semibold text-emerald-800 dark:text-emerald-300' : ''}`}>
+                          {quantityFormat.format(Number(value))}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="p-5 text-sm text-muted-foreground">Registra una cosecha para consultar los totales por unidad.</p>
+          )}
+        </section>
+      )}
     </section>
   );
 }

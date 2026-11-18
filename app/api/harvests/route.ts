@@ -1,301 +1,168 @@
-import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
-import {
-  cleanName,
-  normalizeName,
-  parseDate,
-  parsePositiveDecimal,
-  validateCropReferences,
-  validateUnit,
-} from "@/lib/production-validation";
+import { Prisma } from '@prisma/client'
+import { NextResponse } from 'next/server'
+import { prisma } from '@/lib/prisma'
+import { currentActor, ProductionError, productionError, readBody } from '@/lib/production-api'
+import { historyQuery } from '@/lib/production-history'
+import { activeHarvest, activeLoss, committedStock, stockAllocation } from '@/lib/production-stock'
+import { cleanName, parseDate, parsePositiveDecimal } from '@/lib/production-validation'
+import { lossDraft, saveLoss } from '@/lib/harvest-loss'
+import { moveToTrash } from '@/lib/trash'
 
 const harvestInclude = {
   crop: true,
-  variety: {
-    where: { deletedAt: null },
-  },
-  productionArea: {
-    where: { deletedAt: null },
-  },
+  variety: true,
+  productionArea: true,
   unit: true,
-  losses: {
-    where: {
-      status: "ACTIVE",
-      deletedAt: null,
-    },
-    include: {
-      reason: true,
-    },
-    orderBy: {
-      date: "desc" as const,
-    },
-  },
-};
+  losses: { where: activeLoss, include: { reason: true }, orderBy: { date: 'desc' } },
+} satisfies Prisma.HarvestInclude
+
+type Harvest = Prisma.HarvestGetPayload<{ include: typeof harvestInclude }>
 
 export async function GET(request: Request) {
   try {
-    const { searchParams } = new URL(request.url);
-
-    const cropId = searchParams.get("cropId");
-    const from = searchParams.get("from");
-    const to = searchParams.get("to");
-
-    const where: {
-      status: string;
-      deletedAt: Date | null;
-      cropId?: string;
-      crop?: {
-        is: {
-          deletedAt: null;
-        };
-      };
-      date?: {
-        gte?: Date;
-        lt?: Date;
-      };
-    } = {
-      status: "ACTIVE",
-      deletedAt: null,
-      crop: {
-        is: {
-          deletedAt: null,
-        },
-      },
-    };
-
-    if (cropId) where.cropId = cropId;
-
-    if (from || to) {
-      where.date = {};
-
-      if (from) {
-        const start = parseDate(from);
-
-        if (!start) {
-          return NextResponse.json(
-            { error: "La fecha inicial no es válida." },
-            { status: 400 },
-          );
-        }
-
-        start.setUTCHours(0, 0, 0, 0);
-        where.date.gte = start;
-      }
-
-      if (to) {
-        const end = parseDate(to);
-
-        if (!end) {
-          return NextResponse.json(
-            { error: "La fecha final no es válida." },
-            { status: 400 },
-          );
-        }
-
-        end.setUTCHours(0, 0, 0, 0);
-        end.setUTCDate(end.getUTCDate() + 1);
-        where.date.lt = end;
-      }
-    }
-
-    if (where.date?.gte && where.date?.lt && where.date.gte >= where.date.lt) {
-      return NextResponse.json(
-        { error: "El rango de fechas no es válido." },
-        { status: 400 },
-      );
-    }
-
+    const { cropId, date, search, take, skip, result } = historyQuery(request, 200)
     const rows = await prisma.harvest.findMany({
-      where,
+      where: {
+        ...activeHarvest, cropId, date,
+        OR: search ? [
+          { crop: { name: search } }, { unit: { name: search } }, { variety: { name: search } },
+          { productionArea: { name: search } }, { notes: search },
+        ] : undefined,
+      },
       include: harvestInclude,
-      orderBy: { date: "desc" },
-      take: 200,
-    });
-
-    return NextResponse.json(rows);
+      orderBy: [{ date: 'desc' }, { id: 'desc' }],
+      take, skip,
+    })
+    return NextResponse.json(result(rows))
   } catch (error) {
-    console.error("Error al consultar cosechas:", error);
-
-    return NextResponse.json(
-      { error: "No se pudieron consultar las cosechas." },
-      { status: 500 },
-    );
+    return productionError(error, 'No se pudieron consultar las cosechas.')
   }
 }
 
-export async function POST(request: Request) {
+async function assertReferences(tx: Prisma.TransactionClient, ids: {
+  cropId: string; varietyId: string | null; productionAreaId: string | null; unitId: string
+}, before?: Harvest) {
+  if (before && before.cropId === ids.cropId && before.varietyId === ids.varietyId &&
+    before.productionAreaId === ids.productionAreaId && before.unitId === ids.unitId) return
+
+  if (before && (before.losses.length ||
+      await tx.shipmentAllocation.count({ where: { harvestId: before.id } }) ||
+      await tx.loss.count({ where: { harvestId: before.id } }))) {
+    throw new ProductionError('El cultivo, la variedad, el área y la unidad quedan fijados cuando la cosecha tiene mermas o forma parte de un envío.', 409)
+  }
+
+  const { cropId, varietyId, productionAreaId, unitId } = ids
+  const [crop, unit, variety, area] = await Promise.all([
+    tx.crop.findFirst({ where: { id: cropId, active: true, deletedAt: null } }),
+    tx.unit.findFirst({ where: { id: unitId, active: true, deletedAt: null } }),
+    varietyId && tx.variety.findFirst({ where: { id: varietyId, cropId, active: true, deletedAt: null } }),
+    productionAreaId && tx.productionArea.findFirst({ where: { id: productionAreaId, cropId, active: true, deletedAt: null } }),
+  ])
+  if (!crop || !unit) throw new ProductionError('Selecciona un cultivo y una unidad activos.')
+  if ((varietyId && !variety) || (productionAreaId && !area)) {
+    throw new ProductionError('La variedad, el lote o la zona debe estar activo y pertenecer al cultivo.')
+  }
+}
+
+async function save(request: Request, update: boolean) {
   try {
-    const body = (await request.json()) as Record<string, unknown>;
-
-    const date = parseDate(body.date);
-    const cropId = typeof body.cropId === "string" ? body.cropId : "";
-    const quantity = parsePositiveDecimal(body.quantity);
-
-    if (!date || !cropId || !quantity) {
-      return NextResponse.json(
-        { error: "Fecha, cultivo y cantidad positiva son obligatorios." },
-        { status: 400 },
-      );
+    const body = await readBody(request)
+    const date = parseDate(body.date)
+    const quantity = parsePositiveDecimal(body.quantity)
+    const cropId = typeof body.cropId === 'string' ? body.cropId : ''
+    const id = typeof body.id === 'string' ? body.id : ''
+    if (!date || !cropId || !quantity || (update && !id)) {
+      throw new ProductionError('Fecha, cultivo y cantidad positiva de hasta dos decimales son obligatorios.')
     }
+    const hasPrice = body.estimatedUnitPrice != null && body.estimatedUnitPrice !== ''
+    const estimatedUnitPrice = hasPrice ? parsePositiveDecimal(body.estimatedUnitPrice) : null
+    if (hasPrice && !estimatedUnitPrice) throw new ProductionError('Indica un precio positivo de hasta dos decimales.')
 
-    // El precio estimado es opcional, pero debe ser positivo si se proporciona.
-    const hasPrice =
-      body.estimatedUnitPrice !== undefined &&
-      body.estimatedUnitPrice !== null &&
-      body.estimatedUnitPrice !== "";
-
-    const estimatedUnitPrice = hasPrice
-      ? parsePositiveDecimal(body.estimatedUnitPrice)
-      : null;
-
-    if (hasPrice && !estimatedUnitPrice) {
-      return NextResponse.json(
-        { error: "El precio estimado debe ser mayor que cero." },
-        { status: 400 },
-      );
+    const hasLoss = body.lossQuantity != null && body.lossQuantity !== ''
+    if (!hasLoss && (cleanName(body.lossReason) || cleanName(body.lossNotes) || body.lossDate)) {
+      throw new ProductionError('Completa la cantidad de la merma o deja sus campos vacíos.')
     }
+    if (update && hasLoss) throw new ProductionError('Registra la merma desde la sección Mermas.')
+    const loss = hasLoss ? lossDraft({
+      date: body.lossDate || body.date, quantity: body.lossQuantity, reason: body.lossReason,
+      affectsHarvest: body.lossAffectsHarvest, notes: body.lossNotes,
+    }) : null
 
-    // Datos opcionales de la merma asociada a esta cosecha.
-    const hasLoss =
-      body.lossQuantity !== undefined &&
-      body.lossQuantity !== null &&
-      body.lossQuantity !== "";
-
-    const lossQuantity = hasLoss
-      ? parsePositiveDecimal(body.lossQuantity)
-      : null;
-
-    const lossReason = cleanName(body.lossReason);
-    const lossNotes = cleanName(body.lossNotes);
-    const lossDate = body.lossDate ? parseDate(body.lossDate) : date;
-    const lossAffectsHarvest: boolean | null =
-      typeof body.lossAffectsHarvest === "boolean"
-        ? body.lossAffectsHarvest
-        : null;
-    if (
-      hasLoss &&
-      (!lossQuantity ||
-        !lossReason ||
-        !lossDate ||
-        typeof lossAffectsHarvest !== "boolean")
-    ) {
-      return NextResponse.json(
-        {
-          error:
-            "Para registrar una merma debes indicar una cantidad positiva y un motivo.",
-        },
-        { status: 400 },
-      );
-    }
-
-    if (!hasLoss && (lossReason || lossNotes || body.lossDate)) {
-      return NextResponse.json(
-        { error: "Completa la cantidad de merma o deja sus campos vacíos." },
-        { status: 400 },
-      );
-    }
-
-    if (lossQuantity && lossQuantity > quantity) {
-      return NextResponse.json(
-        { error: "La merma no puede superar la cantidad cosechada." },
-        { status: 400 },
-      );
-    }
-
-    const refs = await validateCropReferences(body, cropId);
-
-    if ("error" in refs) {
-      return NextResponse.json({ error: refs.error }, { status: 400 });
-    }
-
-    const unit = await validateUnit(body.unitId || refs.crop.unitId);
-
-    if (!unit) {
-      return NextResponse.json(
-        { error: "Selecciona una unidad activa." },
-        { status: 400 },
-      );
-    }
-
+    const actor = await currentActor()
     const row = await prisma.$transaction(async (tx) => {
-      const harvest = await tx.harvest.create({
-        data: {
-          date,
-          cropId,
-          varietyId: refs.varietyId,
-          productionAreaId: refs.productionAreaId,
-          quantity,
-          unitId: unit.id,
-          estimatedUnitPrice,
-          notes: cleanName(body.notes) || null,
-        },
-      });
+      const before = update ? await tx.harvest.findFirst({ where: { id, ...activeHarvest }, include: harvestInclude }) : null
+      if (update && !before) throw new ProductionError('La cosecha no existe o está en la papelera.', 404)
+      const crop = typeof body.unitId === 'string' && body.unitId
+        ? null : await tx.crop.findUnique({ where: { id: cropId }, select: { unitId: true } })
+      const unitId = (typeof body.unitId === 'string' && body.unitId) || crop?.unitId || ''
+      const area = body.productionAreaId ?? body.lotId
+      const ids = {
+        cropId, unitId,
+        varietyId: typeof body.varietyId === 'string' && body.varietyId ? body.varietyId : null,
+        productionAreaId: typeof area === 'string' && area ? area : null,
+      }
+      await assertReferences(tx, ids, before ?? undefined)
 
-      if (lossQuantity && lossReason && lossDate) {
-        const normalizedReason = normalizeName(lossReason);
-
-        const existingReason = await tx.lossReason.findUnique({
-          where: {
-            normalizedName: normalizedReason,
-          },
-        });
-
-        if (existingReason?.deletedAt) {
-          throw new Error("LOSS_REASON_IN_TRASH");
+      if (before) {
+        if (!before.quantity.eq(quantity)) {
+          const committed = (await committedStock(tx, [id])).get(id) ?? new Prisma.Decimal(0)
+          if (committed.gt(quantity)) {
+            throw new ProductionError(`La cantidad debe cubrir los envíos y mermas ya registrados (${committed.toFixed(2)}).`, 409)
+          }
         }
-
-        const reason = existingReason
-          ? await tx.lossReason.update({
-              where: {
-                id: existingReason.id,
-              },
-              data: {
-                name: lossReason,
-                active: true,
-              },
-            })
-          : await tx.lossReason.create({
-              data: {
-                name: lossReason,
-                normalizedName: normalizedReason,
-              },
-            });
-
-        await tx.loss.create({
-          data: {
-            harvestId: harvest.id,
-            date: lossDate,
-            quantity: lossQuantity,
-            affectsHarvest: lossAffectsHarvest,
-            reasonId: reason.id,
-            notes: lossNotes || null,
-          },
-        });
+        if (before.date.toISOString().slice(0, 10) !== date.toISOString().slice(0, 10)) {
+          const day = date.toISOString().slice(0, 10)
+          const start = new Date(day + 'T00:00:00.000Z')
+          const earlierShipment = await tx.shipmentAllocation.findFirst({
+            where: { ...stockAllocation, harvestId: id, shipmentItem: {
+              ...stockAllocation.shipmentItem, shipment: { ...stockAllocation.shipmentItem.shipment, date: { lt: start } },
+            } },
+            select: { id: true },
+          })
+          if (earlierShipment || before.losses.some((item) => item.date < start)) {
+            throw new ProductionError('La fecha de la cosecha debe ser igual o anterior a la de sus envíos y mermas.', 409)
+          }
+        }
       }
 
-      return tx.harvest.findUniqueOrThrow({
-        where: { id: harvest.id },
-        include: harvestInclude,
-      });
-    });
-
-    return NextResponse.json(row, { status: 201 });
+      const data = { ...ids, date, quantity, estimatedUnitPrice, notes: cleanName(body.notes).slice(0, 2000) || null }
+      const harvest = before
+        ? await tx.harvest.update({ where: { id }, data })
+        : await tx.harvest.create({ data: { ...data, createdBy: actor } })
+      if (loss) await saveLoss(tx, harvest.id, loss, actor)
+      return tx.harvest.findUniqueOrThrow({ where: { id: harvest.id }, include: harvestInclude })
+    }, { isolationLevel: 'Serializable' })
+    return NextResponse.json(row, { status: update ? 200 : 201 })
   } catch (error) {
-    if (error instanceof Error && error.message === "LOSS_REASON_IN_TRASH") {
-      return NextResponse.json(
-        {
-          error:
-            "La razón de merma está en la papelera. Restáurala antes de utilizarla.",
-        },
-        { status: 409 },
-      );
-    }
+    return productionError(error, 'No se pudo guardar la cosecha.')
+  }
+}
 
-    console.error("Error al registrar cosecha:", error);
+export function POST(request: Request) {
+  return save(request, false)
+}
 
-    return NextResponse.json(
-      { error: "No se pudo registrar la cosecha." },
-      { status: 500 },
-    );
+export function PATCH(request: Request) {
+  return save(request, true)
+}
+
+export async function DELETE(request: Request) {
+  try {
+    const { id } = await readBody(request)
+    if (typeof id !== 'string' || !id) throw new ProductionError('Indica la cosecha que quieres eliminar.')
+    const actor = await currentActor()
+    const result = await prisma.$transaction(async (tx) => {
+      const harvest = await tx.harvest.findFirst({ where: { id, ...activeHarvest }, include: harvestInclude })
+      if (!harvest) throw new ProductionError('La cosecha no existe o está en la papelera.', 404)
+      if (await tx.shipmentAllocation.count({ where: { ...stockAllocation, harvestId: id } })) {
+        throw new ProductionError('La cosecha tiene cantidades asignadas a un envío vigente.', 409)
+      }
+      const entry = await moveToTrash(tx, 'harvest', id, undefined, actor)
+      for (const loss of harvest.losses) await moveToTrash(tx, 'loss', loss.id, entry.groupId, actor)
+      return entry
+    }, { isolationLevel: 'Serializable' })
+    return NextResponse.json(result)
+  } catch (error) {
+    return productionError(error, 'No se pudo mover la cosecha a la papelera.')
   }
 }

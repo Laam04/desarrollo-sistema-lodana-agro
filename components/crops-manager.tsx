@@ -1,7 +1,8 @@
 'use client'
 
 import useSWR from 'swr'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { invalidateProduction, productionFetch } from '@/lib/production-client'
 import {
   AlertTriangle,
   Archive,
@@ -18,6 +19,7 @@ import {
   Ruler,
   Search,
   Sprout,
+  Trash2,
   X,
 } from 'lucide-react'
 
@@ -26,6 +28,7 @@ import {
 type Unit = {
   id: string
   name: string
+  active: boolean
 }
 
 type Variety = {
@@ -59,6 +62,7 @@ type Crop = {
 }
 
 type AreaDraft = {
+  id?: string
   name: string
   type: 'LOT' | 'ZONE'
   surface: string
@@ -73,6 +77,7 @@ type ConfirmState = {
   description: string
   confirmLabel: string
   tone: 'default' | 'danger'
+  confirmName?: string
   onConfirm: () => void | Promise<void>
 } | null
 
@@ -101,11 +106,7 @@ const ui = {
     'inline-flex items-center justify-center gap-1.5 rounded-xl border border-[#cfdcd1] px-3 py-2 text-sm font-medium transition hover:bg-[#eef5ef] disabled:opacity-50 dark:border-[#34453a] dark:hover:bg-[#223027]',
 }
 
-const fetcher = async (url: string) => {
-  const response = await fetch(url)
-  if (!response.ok) throw new Error('No se pudieron cargar los datos.')
-  return response.json()
-}
+const fetcher = productionFetch
 
 /* ───────────────────── Componentes auxiliares ───────────────────── */
 
@@ -266,27 +267,27 @@ function ConfirmDialog({
   busy: boolean
   onCancel: () => void
 }) {
+  const [typedName, setTypedName] = useState('')
+  const dialogRef = useRef<HTMLDialogElement>(null)
   useEffect(() => {
-    function onKey(event: KeyboardEvent) {
-      if (event.key === 'Escape' && !busy) onCancel()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [busy, onCancel])
+    const dialog = dialogRef.current
+    dialog?.showModal()
+    return () => dialog?.close()
+  }, [])
 
   const danger = state.tone === 'danger'
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
-      onClick={() => !busy && onCancel()}
+    <dialog
+      ref={dialogRef}
+      role="alertdialog"
+      aria-labelledby="confirm-title"
+      aria-describedby="confirm-desc"
+      className="m-auto w-[calc(100%-2rem)] max-w-md bg-transparent p-0 text-foreground backdrop:bg-black/50 backdrop:backdrop-blur-sm"
+      onCancel={(event) => { event.preventDefault(); if (!busy) onCancel() }}
+      onClick={(event) => { if (event.target === event.currentTarget && !busy) onCancel() }}
     >
       <div
-        role="alertdialog"
-        aria-modal="true"
-        aria-labelledby="confirm-title"
-        aria-describedby="confirm-desc"
-        onClick={(event) => event.stopPropagation()}
         className={`w-full max-w-md p-6 shadow-xl ${ui.card}`}
       >
         <div className="flex items-start gap-4">
@@ -316,7 +317,13 @@ function ConfirmDialog({
           </div>
         </div>
 
-        <div className="mt-6 flex justify-end gap-2">
+        {state.confirmName && (
+          <label className="mt-4 grid gap-2 text-sm font-medium">
+            Escribe el nombre del cultivo para confirmar
+            <input autoFocus value={typedName} onChange={(event) => setTypedName(event.target.value)} disabled={busy} className={ui.input} />
+          </label>
+        )}
+        <div className="mt-6 flex flex-wrap justify-end gap-2">
           <button
             type="button"
             onClick={onCancel}
@@ -327,8 +334,7 @@ function ConfirmDialog({
           </button>
           <button
             type="button"
-            autoFocus
-            disabled={busy}
+            disabled={busy || (Boolean(state.confirmName) && typedName.trim() !== state.confirmName)}
             onClick={() => state.onConfirm()}
             className={
               danger
@@ -341,7 +347,7 @@ function ConfirmDialog({
           </button>
         </div>
       </div>
-    </div>
+    </dialog>
   )
 }
 
@@ -374,15 +380,15 @@ function StatCard({
 export function CropsManager() {
   const {
     data: crops = [],
-    mutate: refreshCrops,
     error: cropsError,
     isLoading: loadingCrops,
   } = useSWR<Crop[]>('/api/crops?includeInactive=true', fetcher)
 
-  const { data: units = [], mutate: refreshUnits } = useSWR<Unit[]>(
-    '/api/units',
+  const { data: allUnits = [], error: unitsError } = useSWR<Unit[]>(
+    '/api/units?includeInactive=true',
     fetcher,
   )
+  const units = allUnits.filter((unit) => unit.active)
 
   const [name, setName] = useState('')
   const [hasProductionAreas, setHasProductionAreas] = useState(false)
@@ -390,9 +396,11 @@ export function CropsManager() {
   const [varieties, setVarieties] = useState<string[]>([])
   const [areas, setAreas] = useState<AreaDraft[]>([])
   const [areaDraft, setAreaDraft] = useState<AreaDraft>({ ...emptyArea })
+  const [editingAreaIndex, setEditingAreaIndex] = useState<number | null>(null)
 
   const [unitId, setUnitId] = useState('')
   const [newUnit, setNewUnit] = useState('')
+  const [editingUnit, setEditingUnit] = useState<Unit | null>(null)
   const [editingCrop, setEditingCrop] = useState<Crop | null>(null)
   const [showInactive, setShowInactive] = useState(false)
   const [search, setSearch] = useState('')
@@ -429,6 +437,7 @@ export function CropsManager() {
     !!editingCrop ||
     name.trim() !== '' ||
     areas.length > 0 ||
+    areaDraft.name.trim() !== '' ||
     varieties.length > 0 ||
     unitId !== ''
 
@@ -450,8 +459,10 @@ export function CropsManager() {
     setVarieties([])
     setAreas([])
     setAreaDraft({ ...emptyArea })
+    setEditingAreaIndex(null)
     setUnitId('')
     setNewUnit('')
+    setEditingUnit(null)
     setEditingCrop(null)
     setError('')
   }
@@ -474,6 +485,7 @@ export function CropsManager() {
       (crop.productionAreas || [])
         .filter((area) => area.active !== false)
         .map((area) => ({
+          id: area.id,
           name: area.name,
           type: area.type,
           surface: area.surface == null ? '' : String(area.surface),
@@ -483,6 +495,7 @@ export function CropsManager() {
     )
 
     setAreaDraft({ ...emptyArea })
+    setEditingAreaIndex(null)
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
@@ -511,36 +524,53 @@ export function CropsManager() {
     if (!clean) return
 
     askConfirm({
-      title: 'Registrar nueva unidad',
-      description: `Se agregará la unidad "${clean}". Las unidades no se pueden eliminar para proteger el historial de cosechas.`,
-      confirmLabel: 'Registrar unidad',
+      title: editingUnit ? 'Cambiar nombre de unidad' : 'Registrar nueva unidad',
+      description: editingUnit ? `El nombre «${clean}» también se mostrará en el historial.` : `Se agregará la unidad «${clean}» al catálogo.`,
+      confirmLabel: editingUnit ? 'Guardar nombre' : 'Registrar unidad',
       tone: 'default',
-      action: () => addUnit(clean),
+      action: () => saveUnit(clean),
     })
   }
 
-  async function addUnit(clean: string) {
+  async function saveUnit(clean: string) {
     try {
-      const response = await fetch('/api/units', {
-        method: 'POST',
+      const data = await productionFetch<Unit>('/api/units', {
+        method: editingUnit ? 'PATCH' : 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: clean }),
+        body: JSON.stringify({ id: editingUnit?.id, name: clean }),
       })
-
-      const data = await response.json()
-
-      if (!response.ok) {
-        notify('error', data.error ?? 'No se pudo registrar la unidad.')
-        return
-      }
-
-      await refreshUnits()
-      setUnitId(data.id)
+      if (!editingUnit) setUnitId(data.id)
+      setEditingUnit(null)
       setNewUnit('')
-      notify('success', `Unidad "${clean}" registrada correctamente.`)
-    } catch {
-      notify('error', 'No se pudo conectar con el servidor.')
+      notify('success', `Unidad «${clean}» guardada.`)
+      void invalidateProduction('/api/units', '/api/crops', '/api/production-summary', '/api/shipments/availability')
+    } catch (error) {
+      notify('error', error instanceof Error ? error.message : 'No se pudo guardar la unidad.')
     }
+  }
+
+  function requestUnitStatus(unit: Unit) {
+    const label = unit.active ? 'Desactivar' : 'Reactivar'
+    askConfirm({
+      title: `${label} unidad`,
+      description: unit.active ? `«${unit.name}» saldrá del catálogo de unidades activas.` : `«${unit.name}» quedará disponible para nuevos registros.`,
+      confirmLabel: label,
+      tone: unit.active ? 'danger' : 'default',
+      action: async () => {
+        try {
+          await productionFetch('/api/units', {
+            method: unit.active ? 'DELETE' : 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: unit.id, name: unit.name, active: true }),
+          })
+          if (unit.active && unitId === unit.id) setUnitId('')
+          notify('success', unit.active ? 'Unidad desactivada.' : 'Unidad reactivada.')
+          void invalidateProduction('/api/units', '/api/shipments/availability')
+        } catch (error) {
+          notify('error', error instanceof Error ? error.message : 'No se pudo actualizar la unidad.')
+        }
+      },
+    })
   }
 
   /* ─── Áreas productivas ─── */
@@ -549,9 +579,7 @@ export function CropsManager() {
     const clean = areaDraft.name.trim().replace(/\s+/g, ' ')
     if (!clean) return
 
-    const duplicate = areas.some(
-      (area) => area.name.toLowerCase() === clean.toLowerCase(),
-    )
+    const duplicate = areas.some((area, index) => index !== editingAreaIndex && area.name.localeCompare(clean, 'es-EC', { sensitivity: 'base' }) === 0)
 
     if (duplicate) {
       setError('Ya agregaste un área con ese nombre.')
@@ -568,8 +596,10 @@ export function CropsManager() {
     }
 
     setError('')
-    setAreas((current) => [...current, { ...areaDraft, name: clean }])
+    const saved = { ...areaDraft, name: clean }
+    setAreas((current) => editingAreaIndex === null ? [...current, saved] : current.map((area, index) => index === editingAreaIndex ? saved : area))
     setAreaDraft({ ...emptyArea })
+    setEditingAreaIndex(null)
   }
 
   /* ─── Guardar cultivo ─── */
@@ -589,6 +619,11 @@ export function CropsManager() {
 
     if (hasProductionAreas && areas.length === 0) {
       setError('Agrega al menos un lote o zona, o selecciona No.')
+      return
+    }
+
+    if (hasProductionAreas && areaDraft.name.trim()) {
+      setError('Guarda el área en edición antes de guardar el cultivo.')
       return
     }
 
@@ -616,6 +651,7 @@ export function CropsManager() {
       varieties: hasVarieties ? varieties : [],
       productionAreas: hasProductionAreas
         ? areas.map((area) => ({
+            id: area.id,
             name: area.name,
             type: area.type,
             surface: area.type === 'LOT' ? area.surface || null : null,
@@ -627,18 +663,11 @@ export function CropsManager() {
     }
 
     try {
-      const response = await fetch('/api/crops', {
+      await productionFetch('/api/crops', {
         method: editingCrop ? 'PATCH' : 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       })
-
-      const data = await response.json()
-
-      if (!response.ok) {
-        notify('error', data.error ?? 'No se pudo guardar el cultivo.')
-        return
-      }
 
       const wasEditing = !!editingCrop
       resetForm()
@@ -649,9 +678,9 @@ export function CropsManager() {
           : 'Cultivo guardado correctamente.',
       )
 
-      await refreshCrops()
-    } catch {
-      notify('error', 'No se pudo conectar con el servidor.')
+      void invalidateProduction('/api/crops', '/api/shipments/availability')
+    } catch (error) {
+      notify('error', error instanceof Error ? error.message : 'No se pudo guardar el cultivo.')
     } finally {
       setLoading(false)
     }
@@ -688,24 +717,11 @@ export function CropsManager() {
     setBusyId(crop.id)
 
     try {
-      const response = await fetch('/api/crops', {
+      await productionFetch('/api/crops', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: crop.id, active }),
       })
-
-      const data = await response.json()
-
-      if (!response.ok) {
-        notify(
-          'error',
-          data.error ??
-            (active
-              ? 'No se pudo reactivar el cultivo.'
-              : 'No se pudo desactivar el cultivo.'),
-        )
-        return
-      }
 
       if (active) setShowInactive(false)
       notify(
@@ -714,12 +730,39 @@ export function CropsManager() {
           ? `El cultivo "${crop.name}" fue reactivado.`
           : `Cultivo "${crop.name}" desactivado correctamente.`,
       )
-      await refreshCrops()
-    } catch {
-      notify('error', 'No se pudo conectar con el servidor.')
+      void invalidateProduction('/api/crops', '/api/shipments/availability')
+    } catch (error) {
+      notify('error', error instanceof Error ? error.message : 'No se pudo actualizar el cultivo.')
     } finally {
       setBusyId(null)
     }
+  }
+
+  function requestDeleteCrop(crop: Crop) {
+    askConfirm({
+      title: 'Eliminar cultivo',
+      description: `«${crop.name}», sus variedades y sus áreas irán a la papelera. Sus cosechas y envíos siguen en el historial.`,
+      confirmLabel: 'Mover a la papelera',
+      confirmName: crop.name,
+      tone: 'danger',
+      action: async () => {
+        setBusyId(crop.id)
+        try {
+          await productionFetch('/api/crops', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: crop.id, confirmName: crop.name }),
+          })
+          if (editingCrop?.id === crop.id) resetForm()
+          notify('success', 'Cultivo movido a la papelera.')
+          void invalidateProduction('/api/crops', '/api/trash', '/api/shipments/availability')
+        } catch (error) {
+          notify('error', error instanceof Error ? error.message : 'No se pudo eliminar el cultivo.')
+        } finally {
+          setBusyId(null)
+        }
+      },
+    })
   }
 
   /* ───────────────────── Render ───────────────────── */
@@ -860,18 +903,34 @@ export function CropsManager() {
                             </div>
                           </div>
 
+                          <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            aria-label={`Editar ${area.name}`}
+                            onClick={() => { setAreaDraft({ ...area }); setEditingAreaIndex(index) }}
+                            className="rounded-md p-1 text-muted-foreground transition hover:bg-emerald-50 hover:text-emerald-700 dark:hover:bg-emerald-950/40"
+                          >
+                            <Pencil className="size-4" />
+                          </button>
                           <button
                             type="button"
                             aria-label={`Quitar ${area.name}`}
-                            onClick={() =>
+                            onClick={() => {
                               setAreas((current) =>
                                 current.filter((_, i) => i !== index),
                               )
-                            }
+                              if (editingAreaIndex === index) {
+                                setAreaDraft({ ...emptyArea })
+                                setEditingAreaIndex(null)
+                              } else if (editingAreaIndex !== null && index < editingAreaIndex) {
+                                setEditingAreaIndex(editingAreaIndex - 1)
+                              }
+                            }}
                             className="rounded-md p-1 text-muted-foreground transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
                           >
                             <X className="size-4" />
                           </button>
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -890,10 +949,13 @@ export function CropsManager() {
                         }
                       }}
                       placeholder="Nombre del área"
+                      aria-label="Nombre del área"
+                      maxLength={120}
                       className={ui.input}
                     />
 
                     <select
+                      aria-label="Tipo de área"
                       value={areaDraft.type}
                       onChange={(event) =>
                         setAreaDraft({
@@ -921,10 +983,12 @@ export function CropsManager() {
                             })
                           }
                           placeholder="Superficie"
+                          aria-label="Superficie"
                           className={ui.input}
                         />
 
                         <select
+                          aria-label="Unidad de superficie"
                           value={areaDraft.surfaceUnit}
                           onChange={(event) =>
                             setAreaDraft({
@@ -936,6 +1000,7 @@ export function CropsManager() {
                         >
                           <option value="ha">Hectáreas (ha)</option>
                           <option value="m²">Metros cuadrados (m²)</option>
+                          {areaDraft.surfaceUnit !== 'ha' && areaDraft.surfaceUnit !== 'm²' && <option value={areaDraft.surfaceUnit}>{areaDraft.surfaceUnit}</option>}
                         </select>
                       </>
                     )}
@@ -946,6 +1011,8 @@ export function CropsManager() {
                         setAreaDraft({ ...areaDraft, notes: event.target.value })
                       }
                       placeholder="Observaciones (opcional)"
+                      aria-label="Observaciones del área"
+                      maxLength={2000}
                       className={`${ui.input} sm:col-span-2`}
                     />
 
@@ -956,8 +1023,13 @@ export function CropsManager() {
                       className={`${ui.btnGhost} sm:col-span-2`}
                     >
                       <Plus className="size-4" />
-                      Agregar área
+                      {editingAreaIndex === null ? 'Agregar área' : 'Guardar área'}
                     </button>
+                    {editingAreaIndex !== null && (
+                      <button type="button" className={`${ui.btnGhost} sm:col-span-2`} onClick={() => { setAreaDraft({ ...emptyArea }); setEditingAreaIndex(null) }}>
+                        Cancelar edición del área
+                      </button>
+                    )}
                   </div>
                 </div>
               )}
@@ -1004,6 +1076,9 @@ export function CropsManager() {
                   className={ui.input}
                 >
                   <option value="">Seleccionar unidad</option>
+                  {editingCrop?.unit?.id === unitId && !units.some((unit) => unit.id === unitId) && (
+                    <option value={unitId} disabled>{editingCrop.unit.name} (inactiva)</option>
+                  )}
                   {units.map((unit) => (
                     <option key={unit.id} value={unit.id}>
                       {unit.name}
@@ -1014,6 +1089,8 @@ export function CropsManager() {
                 <div className="flex gap-2">
                   <input
                     value={newUnit}
+                    aria-label={editingUnit ? 'Nuevo nombre de la unidad' : 'Nombre de la nueva unidad'}
+                    maxLength={60}
                     onChange={(event) => setNewUnit(event.target.value)}
                     onKeyDown={(event) => {
                       if (event.key === 'Enter') {
@@ -1021,7 +1098,7 @@ export function CropsManager() {
                         requestAddUnit()
                       }
                     }}
-                    placeholder="¿No está en la lista? Crea una nueva"
+                    placeholder={editingUnit ? `Editar «${editingUnit.name}»` : 'Nombre de la nueva unidad'}
                     className={ui.input}
                   />
 
@@ -1030,16 +1107,33 @@ export function CropsManager() {
                     onClick={requestAddUnit}
                     disabled={!newUnit.trim()}
                     className={`${ui.btnGhost} shrink-0`}
-                    aria-label="Agregar unidad"
+                    aria-label={editingUnit ? 'Guardar nombre de unidad' : 'Agregar unidad'}
                   >
-                    <Plus className="size-4" />
+                    {editingUnit ? <CheckCircle2 className="size-4" /> : <Plus className="size-4" />}
                   </button>
                 </div>
-
-                <span className="text-xs text-muted-foreground">
-                  Las unidades son reutilizables y no se eliminan para proteger
-                  el historial.
-                </span>
+                {editingUnit && (
+                  <button type="button" className={`${ui.btnGhost} justify-self-start`} onClick={() => { setNewUnit(''); setEditingUnit(null) }}>
+                    Cancelar edición de unidad
+                  </button>
+                )}
+                {unitsError && <p role="alert" className="text-xs text-red-700 dark:text-red-300">{unitsError.message}</p>}
+                {allUnits.length > 0 && (
+                  <details className="text-sm">
+                    <summary className="cursor-pointer py-1 font-medium">Gestionar unidades</summary>
+                    <ul className="mt-2 grid max-h-60 gap-2 overflow-y-auto">
+                      {allUnits.map((unit) => (
+                        <li key={unit.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-background p-2">
+                          <span className="min-w-0 break-words px-1">{unit.name}{!unit.active && <small className="ml-2 text-muted-foreground">Inactiva</small>}</span>
+                          <div className="flex flex-wrap gap-1">
+                            <button type="button" className={ui.btnGhost} aria-label={`Editar unidad ${unit.name}`} onClick={() => { setEditingUnit(unit); setNewUnit(unit.name) }}><Pencil className="size-3.5" /></button>
+                            <button type="button" className={ui.btnGhost} onClick={() => requestUnitStatus(unit)}>{unit.active ? 'Desactivar' : 'Reactivar'}</button>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
               </div>
             </div>
 
@@ -1209,18 +1303,17 @@ export function CropsManager() {
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => startEditing(crop)}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-[#cfdcd1] px-3 py-1.5 text-xs font-medium transition hover:bg-[#eef5ef] disabled:opacity-50 dark:border-[#34453a] dark:hover:bg-[#223027]"
+                        >
+                          <Pencil className="size-3.5" />
+                          Editar
+                        </button>
                         {crop.active ? (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => startEditing(crop)}
-                              className="inline-flex items-center gap-1.5 rounded-lg border border-[#cfdcd1] px-3 py-1.5 text-xs font-medium transition hover:bg-[#eef5ef] dark:border-[#34453a] dark:hover:bg-[#223027]"
-                            >
-                              <Pencil className="size-3.5" />
-                              Editar
-                            </button>
-
                             <button
                               type="button"
                               disabled={isBusy}
@@ -1234,7 +1327,6 @@ export function CropsManager() {
                               )}
                               Desactivar
                             </button>
-                          </>
                         ) : (
                           <button
                             type="button"
@@ -1250,6 +1342,15 @@ export function CropsManager() {
                             Reactivar
                           </button>
                         )}
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          aria-label={`Eliminar cultivo ${crop.name}`}
+                          onClick={() => requestDeleteCrop(crop)}
+                          className="grid place-items-center rounded-lg border border-red-200 p-1.5 text-red-600 transition hover:bg-red-50 disabled:opacity-50 dark:border-red-900/50 dark:text-red-300 dark:hover:bg-red-950/40"
+                        >
+                          <Trash2 className="size-3.5" />
+                        </button>
                       </div>
                     </div>
 

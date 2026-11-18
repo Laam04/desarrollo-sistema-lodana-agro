@@ -1,159 +1,91 @@
+import { Prisma } from '@prisma/client'
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
+import { ProductionError, productionError } from '@/lib/production-api'
+import { committedStock, endOfDay, shipmentStock } from '@/lib/production-stock'
+import { parseDate } from '@/lib/production-validation'
+import { productKey } from '@/lib/shipments'
+import { editableShipmentStatuses } from '@/lib/shipment-status'
+
+type Availability = {
+  cropId: string
+  cropName: string
+  varietyId: string | null
+  varietyName: string | null
+  productionAreaId: string | null
+  productionAreaName: string | null
+  unitId: string
+  unitName: string
+  available: Prisma.Decimal
+  estimatedValue: Prisma.Decimal
+  missingPrice: boolean
+}
 
 export async function GET(request: Request) {
   try {
-    const { searchParams } = new URL(request.url)
-    const dateParam = searchParams.get('date')
+    const params = new URL(request.url).searchParams
+    const dateParam = params.get('asOf') ?? params.get('date')
+    const date = parseDate(dateParam)
+    if (dateParam !== null && !date) throw new ProductionError('La fecha indicada no es válida.')
+    const exactDate = !params.has('asOf') && date
+    const start = exactDate ? new Date(exactDate) : undefined
+    start?.setUTCHours(0, 0, 0, 0)
 
-    let dateFilter = {}
+    const result = await prisma.$transaction(async (tx) => {
+      const shipmentId = params.get('editShipmentId')
+      const editable = shipmentId ? await tx.shipment.findFirst({
+        where: { id: shipmentId, deletedAt: null, status: { in: editableShipmentStatuses }, receptions: { none: { deletedAt: null } } },
+        select: { id: true },
+      }) : null
 
-    if (dateParam) {
-      const date = new Date(`${dateParam}T00:00:00`)
-
-      if (Number.isNaN(date.getTime())) {
-        return NextResponse.json(
-          { error: 'La fecha indicada no es válida.' },
-          { status: 400 },
-        )
-      }
-
-      const nextDate = new Date(date)
-      nextDate.setDate(nextDate.getDate() + 1)
-
-      dateFilter = {
-        date: {
-          gte: date,
-          lt: nextDate,
-        },
-      }
-    }
-
-    const harvests = await prisma.harvest.findMany({
-      where: {
-        ...dateFilter,
-        status: 'ACTIVE',
-        deletedAt: null,
-        crop: {
-          is: {
-            active: true,
-            deletedAt: null,
-          },
-        },
-        unit: {
-          is: {
-            active: true,
-            deletedAt: null,
-          },
-        },
-      },
-      include: {
-        crop: true,
-        variety: true,
-        productionArea: true,
-        unit: true,
-      },
-      orderBy: [{ date: 'asc' }, { createdAt: 'asc' }],
-    })
-
-    const availability = await Promise.all(
-      harvests.map(async (harvest) => {
-        const [allocations, losses] = await Promise.all([
-          prisma.shipmentAllocation.aggregate({
-            where: {
-              harvestId: harvest.id,
-              deletedAt: null,
-              shipmentItem: {
-                is: {
-                  deletedAt: null,
-                  shipment: {
-                    is: {
-                      deletedAt: null,
-                      status: { not: 'CANCELLED' },
-                    },
-                  },
-                },
-              },
-            },
-            _sum: { quantity: true },
-          }),
-          prisma.loss.aggregate({
-            where: {
-              harvestId: harvest.id,
-              status: 'ACTIVE',
-              deletedAt: null,
-              affectsHarvest: true,
-            },
-            _sum: { quantity: true },
-          }),
-        ])
-
-        const available =
-          Number(harvest.quantity) -
-          Number(allocations._sum.quantity ?? 0) -
-          Number(losses._sum.quantity ?? 0)
-
-        return {
-          harvestId: harvest.id,
-          cropId: harvest.cropId,
-          cropName: harvest.crop.name,
-          varietyId: harvest.varietyId,
-          varietyName: harvest.variety?.name ?? null,
-          productionAreaId: harvest.productionAreaId,
-          productionAreaName: harvest.productionArea?.name ?? null,
-          unitId: harvest.unitId,
-          unitName: harvest.unit.name,
-          available: Math.max(0, available),
+      const harvests = await tx.harvest.findMany({
+        where: { ...shipmentStock, date: date ? { gte: start, lte: endOfDay(date) } : undefined },
+        include: { crop: true, variety: true, productionArea: true, unit: true },
+        orderBy: [{ crop: { name: 'asc' } }, { date: 'asc' }, { id: 'asc' }],
+      })
+      const committed = await committedStock(tx, harvests.map((harvest) => harvest.id), editable?.id)
+      const grouped = new Map<string, Availability>()
+      for (const harvest of harvests) {
+        const key = productKey(harvest)
+        const available = Prisma.Decimal.max(0, harvest.quantity.minus(committed.get(harvest.id) ?? 0))
+        let stock = grouped.get(key)
+        if (!stock) {
+          stock = {
+            cropId: harvest.cropId,
+            cropName: harvest.crop.name,
+            varietyId: harvest.varietyId,
+            varietyName: harvest.variety?.name ?? null,
+            productionAreaId: harvest.productionAreaId,
+            productionAreaName: harvest.productionArea?.name ?? null,
+            unitId: harvest.unitId,
+            unitName: harvest.unit.name,
+            available: new Prisma.Decimal(0),
+            estimatedValue: new Prisma.Decimal(0),
+            missingPrice: false,
+          }
+          grouped.set(key, stock)
         }
-      }),
-    )
 
-    const grouped = new Map<string, {
-      cropId: string
-      cropName: string
-      varietyId: string | null
-      varietyName: string | null
-      productionAreaId: string | null
-      productionAreaName: string | null
-      unitId: string
-      unitName: string
-      available: number
-    }>()
-
-    for (const item of availability) {
-      const key = [
-        item.cropId,
-        item.varietyId ?? '',
-        item.productionAreaId ?? '',
-        item.unitId,
-      ].join('|')
-
-      const current = grouped.get(key)
-
-      if (current) {
-        current.available += item.available
-      } else {
-        grouped.set(key, {
-          cropId: item.cropId,
-          cropName: item.cropName,
-          varietyId: item.varietyId,
-          varietyName: item.varietyName,
-          productionAreaId: item.productionAreaId,
-          productionAreaName: item.productionAreaName,
-          unitId: item.unitId,
-          unitName: item.unitName,
-          available: item.available,
-        })
+        if (available.gt(0)) {
+          stock.available = stock.available.plus(available)
+          if (harvest.estimatedUnitPrice?.gt(0)) {
+            stock.estimatedValue = stock.estimatedValue.plus(available.mul(harvest.estimatedUnitPrice))
+          } else {
+            stock.missingPrice = true
+          }
+        }
       }
-    }
 
-    return NextResponse.json(Array.from(grouped.values()))
+      return [...grouped.values()].map(({ estimatedValue, missingPrice, available, ...product }) => ({
+        ...product,
+        available: available.toNumber(),
+        estimatedUnitPrice: !missingPrice && available.gt(0)
+          ? estimatedValue.div(available).toFixed(2)
+          : null,
+      }))
+    }, { isolationLevel: 'RepeatableRead' })
+    return NextResponse.json(result)
   } catch (error) {
-    console.error('Error al consultar existencias:', error)
-
-    return NextResponse.json(
-      { error: 'No se pudieron consultar las existencias disponibles.' },
-      { status: 500 },
-    )
+    return productionError(error, 'No se pudieron consultar las existencias disponibles.')
   }
 }

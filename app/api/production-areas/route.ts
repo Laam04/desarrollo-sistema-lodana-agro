@@ -1,234 +1,78 @@
-
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
-import {
-  cleanName,
-  normalizeName,
-} from '@/lib/production-validation'
-
-const productionAreaModel =
-  (prisma as any).productionArea ?? (prisma as any).productionAreas
+import { ProductionError, productionError, readBody } from '@/lib/production-api'
+import { cleanName, normalizeCatalogName, parseSurface } from '@/lib/production-validation'
 
 export async function GET(request: Request) {
   try {
-    const { searchParams } = new URL(request.url)
-    const cropId = searchParams.get('cropId')
-
-    const areas = await productionAreaModel.findMany({
-      where: {
-  active: true,
-  deletedAt: null,
-  crop: {
-    deletedAt: null,
-  },
-  ...(cropId ? { cropId } : {}),
-},
+    const cropId = new URL(request.url).searchParams.get('cropId')
+    const areas = await prisma.productionArea.findMany({
+      where: { active: true, deletedAt: null, crop: { active: true, deletedAt: null }, cropId: cropId || undefined },
       include: { crop: true },
-      orderBy: { name: 'asc' },
+      orderBy: [{ crop: { name: 'asc' } }, { name: 'asc' }],
     })
-
     return NextResponse.json(areas)
   } catch (error) {
-    console.error('Error consultando áreas:', error)
-    return NextResponse.json(
-      { error: 'No se pudieron consultar las áreas productivas.' },
-      { status: 500 }
-    )
+    return productionError(error, 'No se pudieron consultar las áreas productivas.')
   }
 }
 
-export async function POST(request: Request) {
+async function save(request: Request, update: boolean) {
   try {
-    const body = await request.json()
-    const cropId = typeof body.cropId === 'string' ? body.cropId : ''
-    const name = cleanName(body.name)
-    const normalizedName = normalizeName(name)
-    const type = body.type === 'ZONE' ? 'ZONE' : 'LOT'
-
-    const surface =
-      body.surface === '' || body.surface == null
-        ? null
-        : Number(body.surface)
-
-    if (!cropId || !name || name.length > 120) {
-      return NextResponse.json(
-        { error: 'Cultivo y nombre del área son obligatorios.' },
-        { status: 400 }
-      )
-    }
-
-    if (
-      surface !== null &&
-      (!Number.isFinite(surface) || surface < 0)
-    ) {
-      return NextResponse.json(
-        { error: 'La superficie debe ser un número válido.' },
-        { status: 400 }
-      )
-    }
-
-    const crop = await prisma.crop.findFirst({
-  where: {
-    id: cropId,
-    active: true,
-    deletedAt: null,
-  },
-})
-
-    if (!crop) {
-      return NextResponse.json(
-        { error: 'El cultivo no existe o está inactivo.' },
-        { status: 400 }
-      )
-    }
-
-    const existing = await productionAreaModel.findFirst({
-      where: { cropId, normalizedName },
-    })
-
-    if (existing?.deletedAt) {
-      return NextResponse.json(
-        {
-          error:
-            'Esta área está en la papelera. Restáurala antes de registrarla nuevamente.',
-        },
-        { status: 409 }
-      )
-    }
-
-    const data = {
-      name,
-      type,
-      surface: type === 'LOT' ? surface : null,
-      surfaceUnit: cleanName(body.surfaceUnit) || 'ha',
-      notes: cleanName(body.notes) || null,
-      active: true,
-    }
-
-    const area = existing
-      ? await productionAreaModel.update({
-          where: { id: existing.id },
-          data,
-        })
-      : await productionAreaModel.create({
-          data: {
-            cropId,
-            normalizedName,
-            ...data,
-          },
-        })
-
-    return NextResponse.json(area, {
-      status: existing ? 200 : 201,
-    })
-  } catch (error) {
-    console.error('Error registrando área:', error)
-    return NextResponse.json(
-      { error: 'No se pudo registrar el área productiva.' },
-      { status: 500 }
-    )
-  }
-}
-
-export async function PATCH(request: Request) {
-  try {
-    const body = await request.json()
+    const body = await readBody(request)
     const id = typeof body.id === 'string' ? body.id : ''
     const name = cleanName(body.name)
+    const normalizedName = normalizeCatalogName(name)
+    if (!normalizedName || name.length > 120 || (update && !id)) throw new ProductionError('Indica el nombre del lote o zona.')
+    if (body.type !== undefined && body.type !== 'LOT' && body.type !== 'ZONE') throw new ProductionError('El tipo de área debe ser lote o zona.')
+    const surface = body.surface == null || body.surface === '' ? null : parseSurface(body.surface)
+    if (body.surface != null && body.surface !== '' && surface === null) throw new ProductionError('Indica una superficie válida de hasta dos decimales.')
 
-    if (!id || !name || name.length > 120) {
-      return NextResponse.json(
-        { error: 'Identificador y nombre del área son obligatorios.' },
-        { status: 400 }
-      )
-    }
+    const result = await prisma.$transaction(async (tx) => {
+      const existing = update ? await tx.productionArea.findFirst({ where: { id, deletedAt: null } }) : null
+      if (update && !existing) throw new ProductionError('Área productiva no encontrada.', 404)
+      const cropId = existing?.cropId ?? (typeof body.cropId === 'string' ? body.cropId : '')
+      if (!await tx.crop.findFirst({ where: { id: cropId, active: true, deletedAt: null } })) {
+        throw new ProductionError('Selecciona un cultivo activo.')
+      }
+      const siblings = await tx.productionArea.findMany({ where: { cropId } })
+      const duplicate = siblings.find((area) => area.id !== id && normalizeCatalogName(area.name) === normalizedName)
+      if (duplicate?.deletedAt) throw new ProductionError('Esta área está en la papelera.', 409)
+      if (update && duplicate) throw new ProductionError('Ya existe un área con ese nombre en este cultivo.', 409)
 
-    const existing = await productionAreaModel.findUnique({
-      where: { id },
-    })
-
-    if (!existing) {
-      return NextResponse.json(
-        { error: 'Área productiva no encontrada.' },
-        { status: 404 }
-      )
-    }
-
-    const normalizedName = normalizeName(name)
-
-    const duplicate = await productionAreaModel.findFirst({
-      where: {
-  cropId: existing.cropId,
-  normalizedName,
-  deletedAt: null,
-  NOT: { id },
-},
-    })
-
-    if (duplicate) {
-      return NextResponse.json(
-        { error: 'Ya existe un área con ese nombre para este cultivo.' },
-        { status: 409 }
-      )
-    }
-
-    const area = await productionAreaModel.update({
-      where: { id },
-      data: {
-        name,
-        normalizedName,
-        ...(body.type === 'LOT' || body.type === 'ZONE'
-          ? { type: body.type }
-          : {}),
-        ...(body.surface !== undefined
-          ? {
-              surface:
-                body.surface === null || body.surface === ''
-                  ? null
-                  : Number(body.surface),
-            }
-          : {}),
-        ...(body.notes !== undefined
-          ? { notes: cleanName(body.notes) || null }
-          : {}),
-      },
-    })
-
-    return NextResponse.json(area)
+      const previous = existing ?? duplicate
+      const type = body.type === 'ZONE' || body.type === 'LOT' ? body.type : previous?.type ?? 'LOT'
+      const data = {
+        name, normalizedName, type,
+        surface: type === 'ZONE' ? null : body.surface === undefined ? previous?.surface : surface,
+        surfaceUnit: type === 'ZONE' ? null : cleanName(body.surfaceUnit).slice(0, 24) || previous?.surfaceUnit || 'ha',
+        notes: body.notes === undefined ? previous?.notes : cleanName(body.notes).slice(0, 2000) || null,
+        active: update ? previous?.active : true,
+      }
+      const area = previous ? await tx.productionArea.update({ where: { id: previous.id }, data })
+        : await tx.productionArea.create({ data: { ...data, cropId } })
+      if (!update) await tx.crop.update({ where: { id: cropId }, data: { hasProductionAreas: true } })
+      return { area, created: !previous }
+    }, { isolationLevel: 'Serializable' })
+    return NextResponse.json(result.area, { status: result.created ? 201 : 200 })
   } catch (error) {
-    console.error('Error actualizando área:', error)
-    return NextResponse.json(
-      { error: 'No se pudo actualizar el área productiva.' },
-      { status: 500 }
-    )
+    return productionError(error, 'No se pudo guardar el área productiva.')
   }
 }
+
+export function POST(request: Request) { return save(request, false) }
+export function PATCH(request: Request) { return save(request, true) }
 
 export async function DELETE(request: Request) {
   try {
-    const body = await request.json()
-    const id = typeof body.id === 'string' ? body.id : ''
-
-    if (!id) {
-      return NextResponse.json(
-        { error: 'Identificador de área obligatorio.' },
-        { status: 400 }
-      )
-    }
-
-    await productionAreaModel.update({
-      where: { id },
-      data: { active: false },
+    const { id } = await readBody(request)
+    if (typeof id !== 'string' || !id) throw new ProductionError('Indica el área que quieres desactivar.')
+    const result = await prisma.productionArea.updateMany({
+      where: { id, deletedAt: null }, data: { active: false },
     })
-
-    return NextResponse.json({
-      message: 'Área productiva desactivada.',
-    })
+    if (!result.count) throw new ProductionError('Área productiva no encontrada.', 404)
+    return NextResponse.json({ message: 'Área productiva desactivada.' })
   } catch (error) {
-    console.error('Error desactivando área:', error)
-    return NextResponse.json(
-      { error: 'No se pudo desactivar el área productiva.' },
-      { status: 500 }
-    )
+    return productionError(error, 'No se pudo desactivar el área productiva.')
   }
 }

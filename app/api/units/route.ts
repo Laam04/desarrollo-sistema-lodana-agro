@@ -1,181 +1,85 @@
-
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
+import { ProductionError, productionError, readBody } from '@/lib/production-api'
 import { cleanName } from '@/lib/production-validation'
+import { activeHarvest, committedStock } from '@/lib/production-stock'
+import { editableShipmentStatuses } from '@/lib/shipment-status'
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const includeInactive = new URL(request.url).searchParams.get('includeInactive') === 'true'
     const units = await prisma.unit.findMany({
-      where: {
-        active: true,
-        deletedAt: null,
-      },
+      where: { deletedAt: null, active: includeInactive ? undefined : true },
       orderBy: { name: 'asc' },
     })
-
     return NextResponse.json(units)
   } catch (error) {
-    console.error('Error consultando unidades:', error)
-    return NextResponse.json(
-      { error: 'No se pudieron consultar las unidades.' },
-      { status: 500 }
-    )
+    return productionError(error, 'No se pudieron consultar las unidades.')
   }
 }
 
-export async function POST(request: Request) {
+async function save(request: Request, update: boolean) {
   try {
-    const body = await request.json()
+    const body = await readBody(request)
     const name = cleanName(body.name)
-
-    if (!name || name.length > 60) {
-      return NextResponse.json(
-        { error: 'Escribe un nombre de unidad válido.' },
-        { status: 400 }
-      )
-    }
-
-    const existing = await prisma.unit.findFirst({
-      where: {
-        name: { equals: name, mode: 'insensitive' },
-      },
-    })
-
-    if (existing?.deletedAt) {
-      return NextResponse.json(
-        {
-          error:
-            'Esta unidad está en la papelera. Restáurala antes de volver a registrarla.',
-        },
-        { status: 409 }
-      )
-    }
-
-    if (existing) {
-      const unit = await prisma.unit.update({
-        where: { id: existing.id },
-        data: { active: true, name },
-      })
-
-      return NextResponse.json(unit)
-    }
-
-    const unit = await prisma.unit.create({
-      data: { name },
-    })
-
-    return NextResponse.json(unit, { status: 201 })
-  } catch (error) {
-    console.error('Error creando unidad:', error)
-    return NextResponse.json(
-      { error: 'No se pudo registrar la unidad.' },
-      { status: 500 }
-    )
-  }
-}
-
-export async function PATCH(request: Request) {
-  try {
-    const body = await request.json()
     const id = typeof body.id === 'string' ? body.id : ''
-    const name = cleanName(body.name)
-
-    if (!id || !name || name.length > 60) {
-      return NextResponse.json(
-        { error: 'Identificador y nombre de unidad son obligatorios.' },
-        { status: 400 }
-      )
-    }
-
-    const existing = await prisma.unit.findUnique({
-      where: { id },
-    })
-
-    if (!existing) {
-      return NextResponse.json(
-        { error: 'Unidad no encontrada.' },
-        { status: 404 }
-      )
-    }
-
-    if (existing.deletedAt) {
-      return NextResponse.json(
-        { error: 'No se puede modificar una unidad que está en la papelera.' },
-        { status: 409 }
-      )
-    }
-
-    const duplicate = await prisma.unit.findFirst({
-      where: {
-        name: { equals: name, mode: 'insensitive' },
-        deletedAt: null,
-        NOT: { id },
-      },
-    })
-
-    if (duplicate) {
-      return NextResponse.json(
-        { error: 'Ya existe una unidad con ese nombre.' },
-        { status: 409 }
-      )
-    }
-
-    const unit = await prisma.unit.update({
-      where: { id },
-      data: { name },
-    })
-
-    return NextResponse.json(unit)
+    if (!name || name.length > 60 || (update && !id)) throw new ProductionError('Indica un nombre de unidad de hasta 60 caracteres.')
+    const result = await prisma.$transaction(async (tx) => {
+      const existing = update ? await tx.unit.findUnique({ where: { id } }) : null
+      if (update && (!existing || existing.deletedAt)) throw new ProductionError('Unidad no encontrada.', 404)
+      const duplicate = await tx.unit.findFirst({
+        where: { name: { equals: name, mode: 'insensitive' }, id: update ? { not: id } : undefined },
+      })
+      if (duplicate?.deletedAt) throw new ProductionError('Esta unidad está en la papelera.', 409)
+      if (update && duplicate) throw new ProductionError('Ya existe una unidad con ese nombre.', 409)
+      if (existing) {
+        const unit = await tx.unit.update({
+          where: { id }, data: { name, active: body.active === true ? true : existing.active },
+        })
+        return { unit, created: false }
+      }
+      if (duplicate) {
+        const unit = await tx.unit.update({ where: { id: duplicate.id }, data: { active: true } })
+        return { unit, created: false }
+      }
+      return { unit: await tx.unit.create({ data: { name } }), created: true }
+    }, { isolationLevel: 'Serializable' })
+    return NextResponse.json(result.unit, { status: result.created ? 201 : 200 })
   } catch (error) {
-    console.error('Error actualizando unidad:', error)
-    return NextResponse.json(
-      { error: 'No se pudo actualizar la unidad.' },
-      { status: 500 }
-    )
+    return productionError(error, 'No se pudo guardar la unidad.')
   }
 }
+
+export function POST(request: Request) { return save(request, false) }
+export function PATCH(request: Request) { return save(request, true) }
 
 export async function DELETE(request: Request) {
   try {
-    const body = await request.json()
-    const id = typeof body.id === 'string' ? body.id : ''
-
-    if (!id) {
-      return NextResponse.json(
-        { error: 'Identificador de unidad obligatorio.' },
-        { status: 400 }
-      )
-    }
-
-    const existing = await prisma.unit.findUnique({
-      where: { id },
-    })
-
-    if (!existing) {
-      return NextResponse.json(
-        { error: 'Unidad no encontrada.' },
-        { status: 404 }
-      )
-    }
-
-    if (existing.deletedAt) {
-      return NextResponse.json(
-        { error: 'La unidad ya está en la papelera.' },
-        { status: 409 }
-      )
-    }
-
-    await prisma.unit.update({
-      where: { id },
-      data: { active: false },
-    })
-
+    const { id } = await readBody(request)
+    if (typeof id !== 'string' || !id) throw new ProductionError('Indica la unidad que quieres desactivar.')
+    await prisma.$transaction(async (tx) => {
+      const unit = await tx.unit.findFirst({ where: { id, deletedAt: null } })
+      if (!unit) throw new ProductionError('Unidad no encontrada.', 404)
+      if (!unit.active) return
+      if (await tx.crop.count({ where: { unitId: id, active: true, deletedAt: null } })) {
+        throw new ProductionError('Cambia la unidad de los cultivos activos que la usan antes de desactivarla.', 409)
+      }
+      if (await tx.shipmentItem.count({
+        where: { unitId: id, deletedAt: null, shipment: { deletedAt: null, status: { in: editableShipmentStatuses } } },
+      })) {
+        throw new ProductionError('Esta unidad está en uso en un envío que todavía puede cancelarse.', 409)
+      }
+      const harvests = await tx.harvest.findMany({
+        where: { ...activeHarvest, unitId: id }, select: { id: true, quantity: true },
+      })
+      const committed = await committedStock(tx, harvests.map((harvest) => harvest.id))
+      if (harvests.some((harvest) => harvest.quantity.gt(committed.get(harvest.id) ?? 0))) {
+        throw new ProductionError('Esta unidad tiene existencias disponibles para envío.', 409)
+      }
+      await tx.unit.update({ where: { id }, data: { active: false } })
+    }, { isolationLevel: 'Serializable' })
     return NextResponse.json({ message: 'Unidad desactivada.' })
   } catch (error) {
-    console.error('Error desactivando unidad:', error)
-    return NextResponse.json(
-      { error: 'No se pudo desactivar la unidad.' },
-      { status: 500 }
-    )
+    return productionError(error, 'No se pudo desactivar la unidad.')
   }
 }
