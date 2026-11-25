@@ -58,6 +58,7 @@ export type AnalyticsReport = {
 }
 
 function median(values: number[]) {
+  if (!values.length) return 0
   const sorted = values.toSorted((a, b) => a - b)
   const middle = Math.floor(sorted.length / 2)
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2
@@ -74,16 +75,24 @@ function estimate(series: Observation[], horizon: number, trend: number) {
 }
 
 export function buildForecast(points: Observation[], lastClosed: string): Forecast {
-  const byMonth = new Map(points.map((point) => [point.month, point]))
+  const byMonth = new Map<string, Observation>()
+  for (const point of points) {
+    if (point.month <= lastClosed && Number.isFinite(point.quantity) && point.quantity >= 0) {
+      byMonth.set(point.month, point)
+    }
+  }
   const consecutive: Observation[] = []
   for (let month = lastClosed; byMonth.has(month); month = shiftMonth(month, -1)) {
     consecutive.unshift(byMonth.get(month)!)
   }
 
+  const historyStart = shiftMonth(lastClosed, -11)
   const result: Forecast = {
-    observedMonths: points.length,
+    observedMonths: byMonth.size,
     consecutiveMonths: consecutive.length,
-    history: points.filter((point) => point.month >= shiftMonth(lastClosed, -11)),
+    history: [...byMonth.values()]
+      .filter((point) => point.month >= historyStart && point.month <= lastClosed)
+      .toSorted((a, b) => a.month.localeCompare(b.month)),
     estimates: [],
     trend: null,
   }
@@ -112,23 +121,26 @@ export function buildForecast(points: Observation[], lastClosed: string): Foreca
 }
 
 export function describeSeasonality(points: Observation[]): Seasonality {
-  const byYear = new Map<string, Observation[]>()
+  const byYear = new Map<string, Map<string, number>>()
   for (const point of points) {
+    if (!Number.isFinite(point.quantity) || point.quantity < 0) continue
     const year = point.month.slice(0, 4)
-    const entries = byYear.get(year) ?? []
-    entries.push(point)
+    const entries = byYear.get(year) ?? new Map<string, number>()
+    entries.set(point.month, point.quantity)
     byYear.set(year, entries)
   }
   const higher = Array<number>(12).fill(0)
   const lower = Array<number>(12).fill(0)
   const typical = Array<number>(12).fill(0)
   const years: Seasonality['years'] = []
+  let positiveYears = 0
   for (const [year, entries] of byYear) {
-    if (entries.length !== 12) continue
-    const total = entries.reduce((sum, entry) => sum + entry.quantity, 0)
+    if (entries.size !== 12) continue
+    const total = [...entries.values()].reduce((sum, quantity) => sum + quantity, 0)
     years.push({ year, total })
     if (total <= 0) continue
-    for (const { month, quantity } of entries) {
+    positiveYears++
+    for (const [month, quantity] of entries) {
       const index = Number(month.slice(-2)) - 1
       const relative = quantity / (total / 12)
       if (relative > 1.1) higher[index]++
@@ -136,8 +148,7 @@ export function describeSeasonality(points: Observation[]): Seasonality {
       else typical[index]++
     }
   }
-  const threshold = Math.max(2, Math.ceil(years.length * 2 / 3))
+  const threshold = Math.max(2, Math.ceil(positiveYears * 2 / 3))
   const supported = (counts: number[]) => counts.flatMap((count, index) => count >= threshold ? [index + 1] : [])
   return { years, higher: supported(higher), lower: supported(lower), typical: supported(typical) }
 }
-

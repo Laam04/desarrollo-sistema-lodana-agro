@@ -1,2 +1,16 @@
-import { PendingPage } from '@/components/pending-page'
-export default function Page() { return <PendingPage title="Reportes" description="El módulo de reportes y análisis está pendiente de conectarse al almacenamiento real." /> }
+import { Suspense } from 'react'
+import { redirect } from 'next/navigation'
+import { ReportsWorkspace } from '@/components/reports-workspace'
+import { currentActor } from '@/lib/production-api'
+
+export const metadata = { title: 'Reportes | Lodana Agro' }
+
+export default async function ReportesPage() {
+  const profile = await currentActor()
+  if (profile !== 'queries' && profile !== 'admin') redirect('/')
+  return (
+    <Suspense>
+      <ReportsWorkspace />
+    </Suspense>
+  )
+}

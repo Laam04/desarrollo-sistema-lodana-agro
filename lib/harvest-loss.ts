@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client'
 import { ProductionError } from '@/lib/production-api'
 import { activeHarvest, committedStock } from '@/lib/production-stock'
 import { cleanName, normalizeName, parseDate, parsePositiveDecimal } from '@/lib/production-validation'
+import { retireIfExpired } from '@/lib/trash'
 
 export const lossInclude = {
   harvest: { include: { crop: true, variety: true, productionArea: true, unit: true } },
@@ -40,12 +41,15 @@ export async function saveLoss(
   }
 
   const normalizedName = normalizeName(draft.reason)
+  const existingReason = await tx.lossReason.findUnique({ where: { normalizedName } })
+  if (existingReason?.deletedAt && !(await retireIfExpired(tx, 'lossReason', existingReason))) {
+    throw new ProductionError('El motivo de merma está en la papelera.', 409)
+  }
   const reason = await tx.lossReason.upsert({
     where: { normalizedName },
     update: { active: true },
     create: { name: draft.reason, normalizedName },
   })
-  if (reason.deletedAt) throw new ProductionError('El motivo de merma está en la papelera.', 409)
 
   const { date, quantity, affectsHarvest, notes } = draft
   const data = { harvestId, date, quantity, affectsHarvest, notes, reasonId: reason.id }

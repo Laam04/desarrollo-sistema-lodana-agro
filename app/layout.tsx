@@ -7,7 +7,6 @@ import { ThemeProvider } from '@/components/theme-provider'
 export const metadata: Metadata = {
   title: 'Lodana Agro | Selección de perfil',
   description: 'Sistema de gestión de producción agrícola para Lodana y Agro Market.',
-  generator: 'v0.app',
   icons: {
     icon: [
       {
@@ -49,7 +48,7 @@ export default function RootLayout({
         >
           {children}
         </ThemeProvider>
-        {process.env.NODE_ENV === 'production' && <Analytics />}
+        {process.env.VERCEL && <Analytics />}
       </body>
     </html>
   )

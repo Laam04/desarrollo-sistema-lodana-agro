@@ -3,8 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 enum ProductionAreaType {
@@ -34,6 +35,7 @@ model Crop {
   costAllocations CostAllocation[]
 
   @@index([active, createdAt])
+  @@index([unitId])
 }
 
 model Variety {
@@ -61,7 +63,7 @@ model ProductionArea {
   name           String
   normalizedName String
   type           ProductionAreaType
-  surface        Decimal?
+  surface        Decimal?           @db.Decimal(12, 2)
   surfaceUnit    String?
   notes          String?
   active         Boolean            @default(true)
@@ -75,6 +77,7 @@ model ProductionArea {
   shipmentItems ShipmentItem[]
 
   @@unique([cropId, normalizedName])
+  @@index([cropId, active])
   @@index([zoneId])
 }
 
@@ -124,6 +127,8 @@ model Harvest {
   allocations    ShipmentAllocation[]
 
   @@index([date, cropId])
+  @@index([cropId, date])
+  @@index([unitId])
   @@index([status])
   @@index([createdAt])
 }
@@ -157,6 +162,9 @@ model Loss {
   reason  LossReason @relation(fields: [reasonId], references: [id])
 
   @@index([harvestId, date])
+  @@index([harvestId, affectsHarvest])
+  @@index([date])
+  @@index([reasonId])
   @@index([status])
 }
 
@@ -202,6 +210,8 @@ model Cost {
   allocations CostAllocation[]
 
   @@index([date, categoryId])
+  @@index([categoryId])
+  @@index([subcategoryId])
 }
 
 model CostAllocation {
@@ -216,10 +226,12 @@ model CostAllocation {
   crop Crop? @relation(fields: [cropId], references: [id])
 
   @@index([costId])
+  @@index([cropId])
 }
 
 model Shipment {
   id        String    @id @default(cuid())
+  requestId String?   @unique
   code      String    @unique
   date      DateTime
   status    String    @default("IN_TRANSIT")
@@ -259,6 +271,7 @@ model ShipmentItem {
 
   @@index([shipmentId])
   @@index([cropId])
+  @@index([unitId])
 }
 
 model ShipmentAllocation {
@@ -280,7 +293,7 @@ model Reception {
   id         String    @id @default(cuid())
   receiptNumber Int    @unique @default(autoincrement())
   shipmentId String
-  receivedAt DateTime  @default(now())
+  receivedAt DateTime  @default(now()) @db.Timestamptz(3)
   receivedBy String?
   closesWithDifferences Boolean @default(false)
   notes      String?
@@ -291,6 +304,7 @@ model Reception {
   items    ReceptionItem[]
 
   @@index([shipmentId, receivedAt])
+  @@index([receivedAt])
 }
 
 model ReceptionItem {
@@ -345,6 +359,8 @@ model AuditLog {
   createdAt  DateTime @default(now())
 
   @@index([entity, entityId, createdAt])
+  @@index([createdAt])
+  @@index([actor, createdAt])
 }
 
 model TrashEntry {
@@ -366,7 +382,78 @@ model TrashEntry {
 }
 
 model ProfileLoginAttempt {
-  profile     String   @id
+  profile     String
+  clientKey   String   @default("global")
   attempts    Int
-  windowStart DateTime
+  windowStart DateTime @db.Timestamptz(3)
+
+  @@id([profile, clientKey])
+  @@index([windowStart])
+}
+
+model ProfileSession {
+  jti       String    @id
+  profile   String
+  expiresAt DateTime  @db.Timestamptz(3)
+  revokedAt DateTime? @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@index([profile, revokedAt])
+  @@index([expiresAt])
+}
+
+model ProfileAccessConfig {
+  profile   String   @id
+  enabled   Boolean  @default(true)
+  pinHash   String?
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+  updatedBy String?
+}
+
+model SystemSetting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+  updatedBy String?
+}
+
+model GeneratedReport {
+  id           String   @id @default(cuid())
+  dedupeKey    String?  @unique
+  type         String
+  title        String
+  trigger      String
+  cadence      String
+  status       String   @default("READY")
+  periodFrom   String
+  periodTo     String
+  periodLabel  String
+  filtersJson  Json?
+  summaryJson  Json?
+  payloadJson  Json?
+  errorMessage String?
+  attempts     Int      @default(1)
+  generatedBy  String
+  generatedAt  DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([type, generatedAt])
+  @@index([trigger, cadence, periodFrom, periodTo])
+  @@index([status, generatedAt])
+  @@index([generatedAt])
+}
+
+model ReportAutomationRun {
+  id             String    @id @default(cuid())
+  source         String
+  status         String
+  checkedPeriods Int       @default(0)
+  createdCount   Int       @default(0)
+  skippedCount   Int       @default(0)
+  failedCount    Int       @default(0)
+  detailsJson    Json?
+  startedAt      DateTime  @default(now()) @db.Timestamptz(3)
+  finishedAt     DateTime? @db.Timestamptz(3)
+
+  @@index([startedAt])
 }

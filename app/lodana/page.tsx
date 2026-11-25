@@ -1,11 +1,16 @@
+import { Suspense } from 'react'
+import { redirect } from 'next/navigation'
 import { ProductionWorkspace } from '@/components/production-workspace'
 import { currentActor } from '@/lib/production-api'
-import { redirect } from 'next/navigation'
 
 export const metadata = { title: 'Producción agrícola | Lodana Agro' }
 
 export default async function LodanaPage() {
   const profile = await currentActor()
   if (profile !== 'production' && profile !== 'admin') redirect('/')
-  return <ProductionWorkspace />
+  return (
+    <Suspense fallback={<div className="p-8 text-sm text-muted-foreground">Cargando módulo de producción…</div>}>
+      <ProductionWorkspace />
+    </Suspense>
+  )
 }

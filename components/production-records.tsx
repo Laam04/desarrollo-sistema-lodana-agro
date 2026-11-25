@@ -2,8 +2,8 @@
 
 import useSWR from "swr";
 import { CostCategoryField } from "@/components/cost-category-field";
-import { formatDate, invalidateProduction, productionFetch, today } from "@/lib/production-client";
-import { receiptCode } from "@/lib/market-data";
+import { createRequestId, formatDate, invalidateProduction, productionFetch, today } from "@/lib/production-client";
+import { cents as parseCents, receiptCode } from "@/lib/market-data";
 import { editableShipmentStatuses, shipmentStatusLabels } from "@/lib/shipment-status";
 import {
   useDeferredValue,
@@ -217,11 +217,11 @@ function formatAmount(value: unknown) {
 }
 
 function shipmentSubtotal(line: ShipmentLine) {
-  const quantity = Math.round(Number(line.quantity) * 100);
-  const price = Math.round(Number(line.unitPrice) * 100);
-  if (!Number.isSafeInteger(quantity) || !Number.isSafeInteger(price) || quantity < 0 || price < 0) return 0;
-  const cents = (BigInt(quantity) * BigInt(price) + BigInt(50)) / BigInt(100);
-  return Number(cents) / 100;
+  const quantity = parseCents(line.quantity);
+  const price = parseCents(line.unitPrice);
+  if (quantity === null || price === null || quantity < 0 || price < 0) return 0;
+  const totalCents = (BigInt(quantity) * BigInt(price) + BigInt(50)) / BigInt(100);
+  return Number(totalCents) / 100;
 }
 
 /* ───────────────────── Componentes de apoyo ───────────────────── */
@@ -481,7 +481,8 @@ export function ProductionRecords({ active }: { active: string }) {
 
   const formRef = useRef<HTMLFormElement>(null);
 
-  const [formDate, setFormDate] = useState(today());
+  const [formDate, setFormDate] = useState(today);
+  const shipmentReplayRef = useRef<{ draft: string; id: string } | null>(null);
 
   // Estado exclusivo de envíos
   const [editingShipmentId, setEditingShipmentId] = useState<string | null>(
@@ -802,8 +803,8 @@ export function ProductionRecords({ active }: { active: string }) {
     setShipmentLines((current) => {
       if (current.some((line) => keyOf(line) === key)) return current;
       const emptyIndex = current.findIndex((line) => !lineHasData(line));
-      if (emptyIndex !== -1) return current.map((line, index) => index === emptyIndex ? lineFromStock(item) : line);
-      return current.length < 100 ? [...current, lineFromStock(item)] : current;
+      if (emptyIndex !== -1) return current.map((line, index) => index === emptyIndex ? lineFromStock(item, item.estimatedUnitPrice ?? "") : line);
+      return current.length < 100 ? [...current, lineFromStock(item, item.estimatedUnitPrice ?? "")] : current;
     });
     setMessage(null);
   }
@@ -857,19 +858,30 @@ export function ProductionRecords({ active }: { active: string }) {
         notes: line.notes,
       }));
 
+      const draftBody = {
+        date: formDate,
+        notes: shipmentNotes,
+        items,
+      };
+      const snapshot = JSON.stringify(draftBody);
+      if (!wasEditing && shipmentReplayRef.current?.draft !== snapshot) {
+        shipmentReplayRef.current = { draft: snapshot, id: createRequestId() };
+      }
+
       const data = await productionFetch<{ code: string }>(
         wasEditing ? `/api/shipments/${editingShipmentId}` : "/api/shipments",
         {
           method: wasEditing ? "PATCH" : "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            date: formDate,
-            notes: shipmentNotes,
-            items,
-          }),
+          body: JSON.stringify(
+            wasEditing
+              ? draftBody
+              : { ...draftBody, requestId: shipmentReplayRef.current!.id },
+          ),
         },
       );
 
+      shipmentReplayRef.current = null;
       setConfirmOpen(false);
       resetShipmentForm();
       setMessage({
@@ -1823,10 +1835,7 @@ export function ProductionRecords({ active }: { active: string }) {
                             <span className="text-muted-foreground">
                               Subtotal:{" "}
                               <strong className="text-foreground">
-                                {formatAmount(
-                                  Number(line.quantity || 0) *
-                                    Number(line.unitPrice || 0),
-                                )}
+                                {formatAmount(shipmentSubtotal(line))}
                               </strong>
                             </span>
                           </div>

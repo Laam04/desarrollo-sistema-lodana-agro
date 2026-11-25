@@ -230,6 +230,7 @@ export function AgroWorkspace({
           </div>
 
           <button
+            type="button"
             ref={closeMenu}
             aria-label="Cerrar menú"
             onClick={() => setMobileOpen(false)}
@@ -300,6 +301,7 @@ export function AgroWorkspace({
 
       {mobileOpen && (
         <button
+          type="button"
           aria-label="Cerrar navegación"
           tabIndex={-1}
           onClick={() => setMobileOpen(false)}
@@ -312,6 +314,7 @@ export function AgroWorkspace({
         <header className="sticky top-0 z-20 flex h-[72px] items-center justify-between border-b border-[#dbe5db] bg-[#f4f7f3]/85 px-5 backdrop-blur-xl dark:border-[#29362f] dark:bg-[#0f1512]/85 sm:px-8">
           <div className="flex items-center gap-3">
             <button
+              type="button"
               aria-label="Abrir menú"
               aria-controls="production-navigation"
               aria-expanded={mobileOpen}

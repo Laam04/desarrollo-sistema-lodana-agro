@@ -1,8 +1,9 @@
 import { Prisma } from '@prisma/client'
 import { NextResponse } from 'next/server'
-import { prisma } from '@/lib/prisma'
-import { currentActor, isRecord, ProductionError, productionError, readBody } from '@/lib/production-api'
+import { prisma, runSerializable } from '@/lib/prisma'
+import { isRecord, ProductionError, productionError, readBody, requireProfile } from '@/lib/production-api'
 import { historyQuery } from '@/lib/production-history'
+import { marketDay } from '@/lib/market-data'
 import { cleanName, parsePositiveDecimal } from '@/lib/production-validation'
 import { receivableStatuses } from '@/lib/shipment-status'
 
@@ -58,8 +59,48 @@ function withReceivedTotals(shipment: ReceptionShipment) {
   }
 }
 
+type ReceptionInputItem = {
+  shipmentItemId: string
+  receivedQuantity: number
+  customerUnitPrice: number | null
+  notes: string | null
+}
+
+function receptionMatches(
+  existing: {
+    deletedAt: Date | null
+    shipmentId: string
+    receivedBy: string | null
+    notes: string | null
+    closesWithDifferences: boolean
+    items: { deletedAt: Date | null; shipmentItemId: string; receivedQuantity: Prisma.Decimal; customerUnitPrice: Prisma.Decimal | null; notes: string | null }[]
+  },
+  params: { shipmentId: string; actor: string; notes: string | null; closesWithDifferences: boolean; items: ReceptionInputItem[] },
+) {
+  return (
+    !existing.deletedAt &&
+    existing.shipmentId === params.shipmentId &&
+    existing.receivedBy === params.actor &&
+    existing.notes === params.notes &&
+    existing.items.length === params.items.length &&
+    params.items.every((item) =>
+      existing.items.some(
+        (saved) =>
+          !saved.deletedAt &&
+          saved.shipmentItemId === item.shipmentItemId &&
+          saved.receivedQuantity.eq(item.receivedQuantity) &&
+          saved.notes === item.notes &&
+          (item.customerUnitPrice === null
+            ? saved.customerUnitPrice === null
+            : saved.customerUnitPrice?.eq(item.customerUnitPrice)),
+      ),
+    )
+  )
+}
+
 export async function GET(request: Request) {
   try {
+    await requireProfile(['reception', 'admin'])
     const params = new URL(request.url).searchParams
     const shipmentId = params.get('shipmentId')
     const view = params.get('view')
@@ -96,18 +137,20 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    const actor = await requireProfile(['reception', 'admin'])
     const body = await readBody(request)
     const { shipmentId, requestId } = body
+    const closesWithDifferences = body.closesWithDifferences === true
     if (typeof shipmentId !== 'string' || !shipmentId ||
       typeof requestId !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(requestId) ||
-      !Array.isArray(body.items) || body.items.length < 1 || body.items.length > 100) {
+      !Array.isArray(body.items) || body.items.length > 100 ||
+      (body.items.length < 1 && !closesWithDifferences)) {
       throw new ProductionError('Indica un envío, una clave de solicitud UUID y los productos recibidos.')
     }
     const id = requestId.toLowerCase()
     const distinct = new Set<string>()
     const notes = cleanName(body.notes).slice(0, 2000) || null
-    const closesWithDifferences = body.closesWithDifferences === true
-    const items = body.items.map((row: unknown) => {
+    const items: ReceptionInputItem[] = body.items.map((row: unknown) => {
       if (!isRecord(row) || typeof row.shipmentItemId !== 'string' || !row.shipmentItemId) {
         throw new ProductionError('Indica el identificador de cada producto recibido.')
       }
@@ -122,59 +165,93 @@ export async function POST(request: Request) {
       }
       return { shipmentItemId: row.shipmentItemId, receivedQuantity, customerUnitPrice, notes: cleanName(row.notes).slice(0, 2000) || null }
     })
-    const actor = await currentActor()
 
-    const result = await prisma.$transaction(async (tx) => {
-      const shipment = await tx.shipment.findFirst({
-        where: { id: shipmentId, deletedAt: null }, include: receptionShipmentInclude,
-      })
-      if (!shipment) throw new ProductionError('Envío no encontrado.', 404)
-      const existing = await tx.reception.findUnique({ where: { id }, include: { items: true } })
-      if (existing) {
-        const matches = !existing.deletedAt && existing.shipmentId === shipmentId &&
-          existing.notes === notes && existing.closesWithDifferences === closesWithDifferences && existing.items.length === items.length &&
-          items.every((item) => existing.items.some((saved) => !saved.deletedAt &&
-            saved.shipmentItemId === item.shipmentItemId && saved.receivedQuantity.eq(item.receivedQuantity) &&
-            saved.notes === item.notes && (item.customerUnitPrice === null
-              ? saved.customerUnitPrice === null : saved.customerUnitPrice?.eq(item.customerUnitPrice))))
-        if (!matches) throw new ProductionError('La clave de solicitud ya está asociada a otra recepción.', 409)
-        return { created: false, reception: existing, shipment: withReceivedTotals(shipment) }
-      }
+    const matchParams = { shipmentId, actor, notes, closesWithDifferences, items }
 
-      if (!receivableStatuses.includes(shipment.status)) {
-        throw new ProductionError('El envío ya está cerrado para nuevas recepciones.', 409)
-      }
-
-      const current = withReceivedTotals(shipment)
-      const pending = new Map(current.items.map((item) => [item.id, item.pendingQuantity]))
-      for (const item of items) {
-        const quantity = pending.get(item.shipmentItemId)
-        if (!quantity) throw new ProductionError('Uno de los productos no pertenece al envío.')
-        if (quantity.lt(item.receivedQuantity)) {
-          throw new ProductionError(`La cantidad recibida supera el saldo pendiente de ${quantity.toFixed(2)}.`, 409)
+    try {
+      const result = await runSerializable(async (tx) => {
+        const shipment = await tx.shipment.findFirst({
+          where: { id: shipmentId, deletedAt: null }, include: receptionShipmentInclude,
+        })
+        if (!shipment) throw new ProductionError('Envío no encontrado.', 404)
+        const existing = await tx.reception.findUnique({
+          where: { id },
+          include: { items: { where: { deletedAt: null } } },
+        })
+        if (existing) {
+          if (!receptionMatches(existing, matchParams)) {
+            throw new ProductionError('La clave de solicitud ya está asociada a otra recepción.', 409)
+          }
+          return { created: false, reception: existing, shipment: withReceivedTotals(shipment) }
         }
-        pending.set(item.shipmentItemId, quantity.minus(item.receivedQuantity))
+
+        if (!receivableStatuses.includes(shipment.status)) {
+          throw new ProductionError('El envío ya está cerrado para nuevas recepciones.', 409)
+        }
+        if (items.length === 0 && shipment.status !== 'PARTIALLY_RECEIVED') {
+          throw new ProductionError('Registra al menos un producto recibido antes de cerrar el envío con diferencias.')
+        }
+        const now = new Date()
+        if (shipment.date.toISOString().slice(0, 10) > marketDay(now)) {
+          throw new ProductionError('No puedes recibir un envío con fecha posterior a hoy.', 409)
+        }
+
+        const current = withReceivedTotals(shipment)
+        const pending = new Map(current.items.map((item) => [item.id, item.pendingQuantity]))
+        for (const item of items) {
+          const quantity = pending.get(item.shipmentItemId)
+          if (!quantity) throw new ProductionError('Uno de los productos no pertenece al envío.')
+          if (quantity.lt(item.receivedQuantity)) {
+            throw new ProductionError(`La cantidad recibida supera el saldo pendiente de ${quantity.toFixed(2)}.`, 409)
+          }
+          pending.set(item.shipmentItemId, quantity.minus(item.receivedQuantity))
+        }
+
+        const allReceived = [...pending.values()].every((quantity) => quantity.isZero())
+        const effectiveClosesWithDifferences = closesWithDifferences && !allReceived
+        const reception = await tx.reception.create({
+          data: {
+            id,
+            shipmentId,
+            receivedAt: now,
+            notes,
+            closesWithDifferences: effectiveClosesWithDifferences,
+            receivedBy: actor,
+            items: items.length ? { create: items } : undefined,
+          },
+          include: { items: { where: { deletedAt: null } } },
+        })
+        const status = allReceived
+          ? 'RECEIVED'
+          : effectiveClosesWithDifferences ? 'RECEIVED_WITH_DIFFERENCES' : 'PARTIALLY_RECEIVED'
+        const updated = await tx.shipment.update({
+          where: { id: shipmentId }, data: { status }, include: receptionShipmentInclude,
+        })
+        await tx.auditLog.create({
+          data: {
+            entity: 'Shipment', entityId: shipmentId, action: 'RECEIVE', actor,
+            beforeJson: { status: shipment.status }, afterJson: { status, receptionId: reception.id },
+          },
+        })
+        return { created: true, reception, shipment: withReceivedTotals(updated) }
+      })
+
+      return NextResponse.json({ reception: result.reception, shipment: result.shipment }, { status: result.created ? 201 : 200 })
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        const [existing, shipment] = await Promise.all([
+          prisma.reception.findUnique({ where: { id }, include: { items: { where: { deletedAt: null } } } }),
+          prisma.shipment.findFirst({ where: { id: shipmentId, deletedAt: null }, include: receptionShipmentInclude }),
+        ])
+        if (existing && shipment) {
+          if (!receptionMatches(existing, matchParams)) {
+            throw new ProductionError('La clave de solicitud ya está asociada a otra recepción.', 409)
+          }
+          return NextResponse.json({ reception: existing, shipment: withReceivedTotals(shipment) }, { status: 200 })
+        }
       }
-
-      const reception = await tx.reception.create({
-        data: { id, shipmentId, notes, closesWithDifferences, receivedBy: actor, items: { create: items } },
-        include: { items: true },
-      })
-      const status = [...pending.values()].every((quantity) => quantity.isZero()) ? 'RECEIVED'
-        : closesWithDifferences ? 'RECEIVED_WITH_DIFFERENCES' : 'PARTIALLY_RECEIVED'
-      const updated = await tx.shipment.update({
-        where: { id: shipmentId }, data: { status }, include: receptionShipmentInclude,
-      })
-      await tx.auditLog.create({
-        data: {
-          entity: 'Shipment', entityId: shipmentId, action: 'RECEIVE', actor,
-          beforeJson: { status: shipment.status }, afterJson: { status, receptionId: reception.id },
-        },
-      })
-      return { created: true, reception, shipment: withReceivedTotals(updated) }
-    }, { isolationLevel: 'Serializable' })
-
-    return NextResponse.json({ reception: result.reception, shipment: result.shipment }, { status: result.created ? 201 : 200 })
+      throw error
+    }
   } catch (error) {
     return productionError(error, 'No se pudo registrar la recepción.')
   }

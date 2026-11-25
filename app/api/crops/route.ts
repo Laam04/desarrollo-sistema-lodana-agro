@@ -1,9 +1,11 @@
 import { Prisma } from '@prisma/client'
 import { NextResponse } from 'next/server'
-import { prisma } from '@/lib/prisma'
-import { currentActor, isRecord, ProductionError, productionError, readBody } from '@/lib/production-api'
+import { prisma, runSerializable } from '@/lib/prisma'
+import { isRecord, ProductionError, productionError, readBody, requireProfile } from '@/lib/production-api'
+import { activeHarvest, committedStock } from '@/lib/production-stock'
 import { cleanName, normalizeCatalogName, parseSurface } from '@/lib/production-validation'
-import { moveToTrash } from '@/lib/trash'
+import { receivableStatuses } from '@/lib/shipment-status'
+import { moveToTrash, retireIfExpired } from '@/lib/trash'
 
 const cropInclude = {
   unit: true,
@@ -70,8 +72,11 @@ async function syncVarieties(tx: Prisma.TransactionClient, cropId: string, rows:
   const byName = new Map(existing.map((row) => [row.normalizedName, row]))
   const activeIds: string[] = []
   for (const row of rows) {
-    const prior = byName.get(row.normalizedName) ?? existing.find((item) => normalizeCatalogName(item.name) === row.normalizedName)
-    if (prior?.deletedAt) throw new ProductionError('Una variedad está en la papelera. Restáurala antes de utilizarla.', 409)
+    let prior = byName.get(row.normalizedName) ?? existing.find((item) => normalizeCatalogName(item.name) === row.normalizedName)
+    if (prior?.deletedAt) {
+      if (await retireIfExpired(tx, 'variety', prior)) prior = undefined
+      else throw new ProductionError('Una variedad está en la papelera. Restáurala antes de utilizarla.', 409)
+    }
     if (prior) {
       if (!prior.active || prior.name !== row.name || prior.normalizedName !== row.normalizedName) {
         await tx.variety.update({ where: { id: prior.id }, data: { ...row, active: true } })
@@ -90,9 +95,13 @@ async function syncAreas(tx: Prisma.TransactionClient, cropId: string, rows: Are
   const byId = new Map(existing.map((row) => [row.id, row]))
   const activeIds: string[] = []
   for (const { id, ...row } of rows) {
-    const matching = byName.get(row.normalizedName) ?? existing.find((item) => normalizeCatalogName(item.name) === row.normalizedName)
-    const prior = id ? byId.get(id) : matching
+    let matching = byName.get(row.normalizedName) ?? existing.find((item) => normalizeCatalogName(item.name) === row.normalizedName)
+    let prior = id ? byId.get(id) : matching
     if (id && !prior) throw new ProductionError('Una de las áreas no pertenece a este cultivo.')
+    if (matching?.deletedAt && (await retireIfExpired(tx, 'productionArea', matching))) {
+      if (prior?.id === matching.id) prior = undefined
+      matching = undefined
+    }
     if (prior?.deletedAt || matching?.deletedAt) throw new ProductionError('Un lote o zona está en la papelera.', 409)
     if (matching && prior?.id !== matching.id) throw new ProductionError('Ya existe un área con ese nombre.', 409)
     const zone = await tx.zone.upsert({
@@ -114,10 +123,13 @@ async function linkZones(tx: Prisma.TransactionClient, cropId: string, zoneIds: 
   if (zones.length !== zoneIds.length) throw new ProductionError('Una de las zonas ya no está disponible.')
   const areaIds: string[] = []
   for (const { id: zoneId, name, normalizedName } of zones) {
-    const prior = await tx.productionArea.findFirst({
+    let prior = await tx.productionArea.findFirst({
       where: { cropId, OR: [{ zoneId }, { normalizedName }] },
     })
-    if (prior?.deletedAt) throw new ProductionError('El vínculo con esta zona está en la papelera.', 409)
+    if (prior?.deletedAt) {
+      if (await retireIfExpired(tx, 'productionArea', prior)) prior = null
+      else throw new ProductionError('El vínculo con esta zona está en la papelera.', 409)
+    }
     const area = prior
       ? await tx.productionArea.update({ where: { id: prior.id }, data: { zoneId, active: true } })
       : await tx.productionArea.create({ data: { cropId, zoneId, name, normalizedName, type: 'ZONE' } })
@@ -134,8 +146,46 @@ async function validateUnit(tx: Prisma.TransactionClient, unitId: string | null)
   }
 }
 
+async function assertNoOpenCropDependencies(tx: Prisma.TransactionClient, cropId: string, forDelete: boolean) {
+  if (await tx.shipmentItem.count({
+    where: { cropId, deletedAt: null, shipment: { deletedAt: null, status: { in: receivableStatuses } } },
+  })) {
+    throw new ProductionError(
+      forDelete
+        ? 'No puedes eliminar un cultivo con envíos en tránsito o con recepción pendiente.'
+        : 'No puedes desactivar un cultivo con envíos en tránsito o con recepción pendiente.',
+      409,
+    )
+  }
+
+  if (forDelete) {
+    const [activeHarvestCount, activeShipmentCount, activeCostCount] = await Promise.all([
+      tx.harvest.count({ where: { ...activeHarvest, cropId } }),
+      tx.shipmentItem.count({ where: { cropId, deletedAt: null, shipment: { deletedAt: null, status: { not: 'CANCELLED' } } } }),
+      tx.costAllocation.count({ where: { cropId, deletedAt: null, cost: { deletedAt: null } } }),
+    ])
+    if (activeHarvestCount || activeShipmentCount || activeCostCount) {
+      throw new ProductionError(
+        'Este cultivo tiene cosechas, envíos o costos registrados. Desactívalo en lugar de moverlo a la papelera.',
+        409,
+      )
+    }
+    return
+  }
+
+  const harvests = await tx.harvest.findMany({
+    where: { ...activeHarvest, cropId },
+    select: { id: true, quantity: true },
+  })
+  const committed = await committedStock(tx, harvests.map((h) => h.id))
+  if (harvests.some((h) => h.quantity.gt(committed.get(h.id) ?? 0))) {
+    throw new ProductionError('Este cultivo tiene existencias disponibles para envío. Despacha o ajusta el saldo antes de desactivarlo.', 409)
+  }
+}
+
 export async function GET(request: Request) {
   try {
+    await requireProfile(['production', 'admin'])
     const includeInactive = new URL(request.url).searchParams.get('includeInactive') === 'true'
     const children = { deletedAt: null, active: includeInactive ? undefined : true }
     const crops = await prisma.crop.findMany({
@@ -146,6 +196,7 @@ export async function GET(request: Request) {
         productionAreas: { ...cropInclude.productionAreas, where: children },
       },
       orderBy: [{ name: 'asc' }, { id: 'asc' }],
+      take: 500,
     })
     return NextResponse.json(crops)
   } catch (error) {
@@ -155,26 +206,40 @@ export async function GET(request: Request) {
 
 async function save(request: Request, update: boolean) {
   try {
+    const actor = await requireProfile(['production', 'admin'])
     const body = await readBody(request)
     const id = typeof body.id === 'string' ? body.id : ''
     if (update && !id) throw new ProductionError('Indica el cultivo que quieres modificar.')
     const varieties = body.varieties === undefined ? undefined : varietyDrafts(body.varieties)
     const areas = areaDrafts(body)
-    const zoneIds = body.zoneIds === undefined ? undefined : [...new Set(catalogRows(body.zoneIds, 'zonas').map((id) => {
-      if (typeof id !== 'string' || !id) throw new ProductionError('Selecciona una zona válida.')
-      return id
+    const zoneIds = body.zoneIds === undefined ? undefined : [...new Set(catalogRows(body.zoneIds, 'zonas').map((zid) => {
+      if (typeof zid !== 'string' || !zid) throw new ProductionError('Selecciona una zona válida.')
+      return zid
     }))]
-    if (zoneIds && !zoneIds.length) throw new ProductionError('Vincula al menos una zona al cultivo.')
-    if (!zoneIds && ((!update && !areas?.length) || (areas && !areas.length) || body.hasProductionAreas === false)) {
-      throw new ProductionError('Vincula al menos una zona al cultivo.')
+    const isStatusToggle = update && typeof body.active === 'boolean' && body.name === undefined
+    if (isStatusToggle && (varieties !== undefined || areas !== undefined || zoneIds !== undefined || body.unitId !== undefined)) {
+      throw new ProductionError('Envía solo el identificador y el estado para activar o desactivar el cultivo.')
+    }
+    if (!isStatusToggle) {
+      if (zoneIds && !zoneIds.length) throw new ProductionError('Vincula al menos una zona al cultivo.')
+      if (!zoneIds && ((!update && !areas?.length) || (areas && !areas.length) || body.hasProductionAreas === false)) {
+        throw new ProductionError('Vincula al menos una zona al cultivo.')
+      }
     }
 
-    const result = await prisma.$transaction(async (tx) => {
+    const result = await runSerializable(async (tx) => {
       const before = update ? await tx.crop.findFirst({ where: { id, deletedAt: null }, include: cropInclude }) : null
       if (update && !before) throw new ProductionError('El cultivo no existe o está en la papelera.', 404)
-      if (before && typeof body.active === 'boolean' && body.name === undefined) {
-        if (body.active) await validateUnit(tx, before.unitId)
-        const crop = await tx.crop.update({ where: { id }, data: { active: body.active }, include: cropInclude })
+      if (before && isStatusToggle) {
+        if (body.active === true) await validateUnit(tx, before.unitId)
+        else if (before.active) await assertNoOpenCropDependencies(tx, id, false)
+        const crop = await tx.crop.update({ where: { id }, data: { active: body.active as boolean }, include: cropInclude })
+        await tx.auditLog.create({
+          data: {
+            entity: 'Crop', entityId: id, action: body.active ? 'ACTIVATE' : 'DEACTIVATE', actor,
+            beforeJson: { active: before.active }, afterJson: { active: crop.active },
+          },
+        })
         return { crop, created: false }
       }
 
@@ -182,14 +247,8 @@ async function save(request: Request, update: boolean) {
       const unitId = typeof body.unitId === 'string' ? body.unitId : before?.unitId ?? null
       await validateUnit(tx, unitId)
       let duplicate = await tx.crop.findUnique({ where: { normalizedName: name.normalizedName } })
-      if (!update && duplicate?.deletedAt) {
-        const expired = await tx.trashEntry.findFirst({
-          where: { entityType: 'crop', entityId: duplicate.id, deletedAt: duplicate.deletedAt, purgeAt: { lte: new Date() }, restoredAt: null },
-        })
-        if (expired) {
-          await tx.crop.update({ where: { id: duplicate.id }, data: { normalizedName: `~retirado-${duplicate.id}` } })
-          duplicate = null
-        }
+      if (!update && duplicate?.deletedAt && (await retireIfExpired(tx, 'crop', duplicate))) {
+        duplicate = null
       }
       if (!update && duplicate?.active && !duplicate.deletedAt && zoneIds) {
         if (duplicate.unitId !== unitId) throw new ProductionError('Usa la unidad registrada del cultivo para agregarle nuevas zonas.', 409)
@@ -215,8 +274,15 @@ async function save(request: Request, update: boolean) {
       if (zoneIds) await linkZones(tx, saved.id, zoneIds, true)
       else if (areas) await syncAreas(tx, saved.id, areas)
       const crop = await tx.crop.findUniqueOrThrow({ where: { id: saved.id }, include: cropInclude })
+      await tx.auditLog.create({
+        data: {
+          entity: 'Crop', entityId: crop.id, action: existing ? 'UPDATE' : 'CREATE', actor,
+          beforeJson: before ? { name: before.name, unitId: before.unitId, active: before.active } : undefined,
+          afterJson: { name: crop.name, unitId: crop.unitId, active: crop.active },
+        },
+      })
       return { crop, created: !existing }
-    }, { isolationLevel: 'Serializable' })
+    })
     return NextResponse.json(result.crop, { status: result.created ? 201 : 200 })
   } catch (error) {
     return productionError(error, 'No se pudo guardar el cultivo.')
@@ -228,21 +294,25 @@ export function PATCH(request: Request) { return save(request, true) }
 
 export async function DELETE(request: Request) {
   try {
+    const actor = await requireProfile(['production', 'admin'])
     const { id, confirmName } = await readBody(request)
     if (typeof id !== 'string' || !id || typeof confirmName !== 'string') {
       throw new ProductionError('Indica el cultivo y escribe su nombre para confirmar.')
     }
-    const actor = await currentActor()
-    const entry = await prisma.$transaction(async (tx) => {
+    const entry = await runSerializable(async (tx) => {
       const crop: Crop | null = await tx.crop.findFirst({ where: { id, deletedAt: null }, include: cropInclude })
       if (!crop) throw new ProductionError('El cultivo no existe o está en la papelera.', 404)
       if (confirmName.trim() !== crop.name) throw new ProductionError('El nombre de confirmación no coincide.')
+      await assertNoOpenCropDependencies(tx, id, true)
 
       const group = await moveToTrash(tx, 'crop', id, undefined, actor)
       for (const variety of crop.varieties) await moveToTrash(tx, 'variety', variety.id, group.groupId, actor)
       for (const area of crop.productionAreas) await moveToTrash(tx, 'productionArea', area.id, group.groupId, actor)
+      await tx.auditLog.create({
+        data: { entity: 'Crop', entityId: id, action: 'TRASH', actor, beforeJson: { name: crop.name } },
+      })
       return group
-    }, { isolationLevel: 'Serializable' })
+    })
     return NextResponse.json({ success: true, groupId: entry.groupId, message: 'El cultivo se movió a la papelera.' })
   } catch (error) {
     return productionError(error, 'No se pudo mover el cultivo a la papelera.')

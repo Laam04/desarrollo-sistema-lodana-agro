@@ -3,8 +3,8 @@
 import { useDeferredValue, useRef, useState, type FormEvent } from 'react'
 import { Banknote, Download, Pencil, Plus, Search, ShoppingBasket, Trash2 } from 'lucide-react'
 import useSWR from 'swr'
-import { ApiError, formatDate, invalidateProduction, productionFetch } from '@/lib/production-client'
-import { cents, decimalInput, farmSupplier, formatMarkup, marketDay, marketWeek, markupPercent, receiptCode, salesValue, sheetColumns, units, usd, type PageResult, type SaleRow, type SalesDay, type StockRow } from '@/lib/market-data'
+import { ApiError, createRequestId, formatDate, invalidateProduction, productionFetch } from '@/lib/production-client'
+import { cents, decimalInput, farmSupplier, formatMarkup, isValidIsoDay, marketDay, marketWeek, markupPercent, receiptCode, salesValue, sheetColumns, units, usd, type PageResult, type SaleRow, type SalesDay, type StockRow } from '@/lib/market-data'
 import { MarketDialog, MarketError, MarketPagination, marketUi } from '@/components/market-ui'
 
 const salesApi = '/api/market-sales'
@@ -17,6 +17,8 @@ export function MarketSales() {
   const [cancelling, setCancelling] = useState<SaleRow | null>(null)
   const [cancelBusy, setCancelBusy] = useState(false)
   const [cancelError, setCancelError] = useState('')
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState('')
   const [notice, setNotice] = useState('')
   const editorRef = useRef<HTMLDivElement>(null)
 
@@ -25,11 +27,41 @@ export function MarketSales() {
   const dateLabel = week ? `${formatDate(week.from)} al ${formatDate(week.to)}` : formatDate(date)
 
   function changeDate(value: string) {
-    if (!value) return
+    if (!value || !isValidIsoDay(value)) return
     setDate(value)
     setPage(1)
     setEditing(null)
     setNotice('')
+  }
+
+  async function exportCsv() {
+    if (exporting) return
+    setExporting(true)
+    setExportError('')
+    try {
+      const response = await fetch(salesApi + '?' + new URLSearchParams({ date, period, export: 'csv' }))
+      if (response.status === 401) {
+        window.location.replace('/')
+        return
+      }
+      if (!response.ok) {
+        const body = await response.json().catch(() => null)
+        throw new Error(body?.error ?? 'No se pudo exportar el archivo CSV.')
+      }
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `agro-market-${week ? `${week.from}_a_${week.to}` : date}.csv`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+    } catch (failure) {
+      setExportError(failure instanceof Error ? failure.message : 'No se pudo exportar el archivo CSV.')
+    } finally {
+      setExporting(false)
+    }
   }
 
   function saved(message: string) {
@@ -76,10 +108,11 @@ export function MarketSales() {
               <option value="day">Día</option>
             </select>
           </label>
-          <a download className={marketUi.button} href={salesApi + '?' + new URLSearchParams({ date, period, export: 'csv' })}>
-            <Download className="size-4" aria-hidden /> Exportar a Excel (CSV)
-          </a>
+          <button type="button" disabled={exporting} onClick={exportCsv} className={marketUi.button}>
+            <Download className="size-4" aria-hidden /> {exporting ? 'Exportando…' : 'Exportar a Excel (CSV)'}
+          </button>
         </div>
+        {exportError && <p role="alert" className="mt-3 text-sm text-red-700 dark:text-red-300">{exportError}</p>}
         <dl className="mt-4 grid gap-2 sm:grid-cols-2">
           {([
             ['Ventas registradas', data ? units(data.totals.count) : undefined],
@@ -198,7 +231,7 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
       setError('Selecciona un producto disponible e ingresa una cantidad y un precio positivos de hasta dos decimales.')
       return
     }
-    if (replay.current?.draft !== snapshot) replay.current = { draft: snapshot, id: crypto.randomUUID() }
+    if (replay.current?.draft !== snapshot) replay.current = { draft: snapshot, id: createRequestId() }
     setBusy(true)
     try {
       await productionFetch(salesApi, {
@@ -207,6 +240,7 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
       })
       replay.current = null
       setRetrying(false)
+      if (!editing) setProduct(null)
       setQuantity('')
       setPrice('')
       onSaved(editing ? 'Cambios guardados en la venta.' : 'Venta registrada.')

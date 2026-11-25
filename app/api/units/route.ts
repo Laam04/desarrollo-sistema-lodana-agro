@@ -1,16 +1,19 @@
 import { NextResponse } from 'next/server'
-import { prisma } from '@/lib/prisma'
-import { ProductionError, productionError, readBody } from '@/lib/production-api'
+import { prisma, runSerializable } from '@/lib/prisma'
+import { ProductionError, productionError, readBody, requireProfile } from '@/lib/production-api'
 import { cleanName } from '@/lib/production-validation'
 import { activeHarvest, committedStock } from '@/lib/production-stock'
 import { editableShipmentStatuses } from '@/lib/shipment-status'
+import { retireIfExpired } from '@/lib/trash'
 
 export async function GET(request: Request) {
   try {
+    await requireProfile(['production', 'admin'])
     const includeInactive = new URL(request.url).searchParams.get('includeInactive') === 'true'
     const units = await prisma.unit.findMany({
       where: { deletedAt: null, active: includeInactive ? undefined : true },
       orderBy: { name: 'asc' },
+      take: 500,
     })
     return NextResponse.json(units)
   } catch (error) {
@@ -20,21 +23,28 @@ export async function GET(request: Request) {
 
 async function save(request: Request, update: boolean) {
   try {
+    const actor = await requireProfile(['production', 'admin'])
     const body = await readBody(request)
     const name = cleanName(body.name)
     const id = typeof body.id === 'string' ? body.id : ''
     if (!name || name.length > 60 || (update && !id)) throw new ProductionError('Indica un nombre de unidad de hasta 60 caracteres.')
-    const result = await prisma.$transaction(async (tx) => {
+    const result = await runSerializable(async (tx) => {
       const existing = update ? await tx.unit.findUnique({ where: { id } }) : null
       if (update && (!existing || existing.deletedAt)) throw new ProductionError('Unidad no encontrada.', 404)
-      const duplicate = await tx.unit.findFirst({
+      let duplicate = await tx.unit.findFirst({
         where: { name: { equals: name, mode: 'insensitive' }, id: update ? { not: id } : undefined },
       })
-      if (duplicate?.deletedAt) throw new ProductionError('Esta unidad está en la papelera.', 409)
+      if (duplicate?.deletedAt) {
+        if (await retireIfExpired(tx, 'unit', duplicate)) duplicate = null
+        else throw new ProductionError('Esta unidad está en la papelera.', 409)
+      }
       if (update && duplicate) throw new ProductionError('Ya existe una unidad con ese nombre.', 409)
       if (existing) {
         const unit = await tx.unit.update({
           where: { id }, data: { name, active: body.active === true ? true : existing.active },
+        })
+        await tx.auditLog.create({
+          data: { entity: 'Unit', entityId: unit.id, action: 'UPDATE', actor, beforeJson: { name: existing.name, active: existing.active }, afterJson: { name: unit.name, active: unit.active } },
         })
         return { unit, created: false }
       }
@@ -42,8 +52,12 @@ async function save(request: Request, update: boolean) {
         const unit = await tx.unit.update({ where: { id: duplicate.id }, data: { active: true } })
         return { unit, created: false }
       }
-      return { unit: await tx.unit.create({ data: { name } }), created: true }
-    }, { isolationLevel: 'Serializable' })
+      const unit = await tx.unit.create({ data: { name } })
+      await tx.auditLog.create({
+        data: { entity: 'Unit', entityId: unit.id, action: 'CREATE', actor, afterJson: { name: unit.name } },
+      })
+      return { unit, created: true }
+    })
     return NextResponse.json(result.unit, { status: result.created ? 201 : 200 })
   } catch (error) {
     return productionError(error, 'No se pudo guardar la unidad.')
@@ -55,9 +69,10 @@ export function PATCH(request: Request) { return save(request, true) }
 
 export async function DELETE(request: Request) {
   try {
+    const actor = await requireProfile(['production', 'admin'])
     const { id } = await readBody(request)
     if (typeof id !== 'string' || !id) throw new ProductionError('Indica la unidad que quieres desactivar.')
-    await prisma.$transaction(async (tx) => {
+    await runSerializable(async (tx) => {
       const unit = await tx.unit.findFirst({ where: { id, deletedAt: null } })
       if (!unit) throw new ProductionError('Unidad no encontrada.', 404)
       if (!unit.active) return
@@ -77,7 +92,10 @@ export async function DELETE(request: Request) {
         throw new ProductionError('Esta unidad tiene existencias disponibles para envío.', 409)
       }
       await tx.unit.update({ where: { id }, data: { active: false } })
-    }, { isolationLevel: 'Serializable' })
+      await tx.auditLog.create({
+        data: { entity: 'Unit', entityId: id, action: 'DEACTIVATE', actor, beforeJson: { name: unit.name, active: true }, afterJson: { active: false } },
+      })
+    })
     return NextResponse.json({ message: 'Unidad desactivada.' })
   } catch (error) {
     return productionError(error, 'No se pudo desactivar la unidad.')

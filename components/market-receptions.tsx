@@ -4,7 +4,7 @@ import { useDeferredValue, useRef, useState, type FormEvent } from 'react'
 import useSWR from 'swr'
 import Link from 'next/link'
 import { ClipboardCheck, Inbox, PackageCheck, Search, Truck } from 'lucide-react'
-import { ApiError, formatDate, formatTimestampDate, invalidateProduction, productionFetch } from '@/lib/production-client'
+import { ApiError, createRequestId, formatDate, formatTimestampDate, invalidateProduction, productionFetch } from '@/lib/production-client'
 import { cents, decimalInput, farmSupplier, formatMarkup, markupPercent, receiptCode, units, usd, type MarketShipment, type MarketShipmentDetail, type PageResult } from '@/lib/market-data'
 import { receivableStatuses, shipmentStatusLabels } from '@/lib/shipment-status'
 import { MarketDialog, MarketError, MarketPagination, marketUi } from '@/components/market-ui'
@@ -151,6 +151,7 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [retryError, setRetryError] = useState('')
+  const replay = useRef<{ draft: string; id: string } | null>(null)
 
   function line(id: string) {
     return lines[id] ?? { quantity: '', notes: '', customerUnitPrice: '' }
@@ -188,7 +189,12 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
       return
     }
     setRetryError('')
-    setReview({ requestId: crypto.randomUUID(), shipmentId: shipment.id, notes, closesWithDifferences: hasDifference && closeWithDifferences, items })
+    const draftPayload = { shipmentId: shipment.id, notes, closesWithDifferences: hasDifference && closeWithDifferences, items }
+    const snapshot = JSON.stringify(draftPayload)
+    if (replay.current?.draft !== snapshot) {
+      replay.current = { draft: snapshot, id: createRequestId() }
+    }
+    setReview({ requestId: replay.current.id, ...draftPayload })
   }
 
   async function confirm() {
@@ -199,6 +205,7 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
       const result = await productionFetch<{ reception: { receiptNumber: number } }>('/api/receptions', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(review),
       })
+      replay.current = null
       setLines({})
       setNotes('')
       setCloseWithDifferences(false)
@@ -207,6 +214,7 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
     } catch (failure) {
       const message = failure instanceof Error ? failure.message : 'No se pudo confirmar la recepción.'
       if (failure instanceof ApiError && failure.status >= 400 && failure.status < 500) {
+        replay.current = null
         setError(message)
         setReview(null)
         onRefresh()
@@ -232,7 +240,7 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
         {canReceive && (
           <p className="px-4 py-3 text-xs text-muted-foreground sm:px-5">Ingresa la cantidad que llegó físicamente. El precio al cliente es opcional y se sugiere al registrar la venta.</p>
         )}
-        <div className={canReceive ? 'overflow-x-auto' : 'mt-4 overflow-x-auto'} tabIndex={0} aria-label="Productos en el envío">
+        <div className={canReceive ? 'overflow-x-auto' : 'mt-4 overflow-x-auto'} tabIndex={0} role="region" aria-label="Productos en el envío">
           <table className="w-full text-sm">
             <thead className={marketUi.tableHead}>
               <tr>

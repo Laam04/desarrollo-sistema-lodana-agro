@@ -13,8 +13,17 @@ export function marketDay(date = new Date()) {
   return farmDay.format(date)
 }
 
+export function isValidIsoDay(day: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false
+  const year = Number(day.slice(0, 4))
+  if (year < 2000 || year > 2100) return false
+  const parsed = new Date(day + 'T00:00:00Z')
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === day
+}
+
 export function marketWeek(day: string) {
-  const start = new Date(day + 'T00:00:00Z')
+  const safeDay = isValidIsoDay(day) ? day : marketDay()
+  const start = new Date(safeDay + 'T00:00:00Z')
   start.setUTCDate(start.getUTCDate() - (start.getUTCDay() + 6) % 7)
   const end = new Date(start)
   end.setUTCDate(end.getUTCDate() + 6)
@@ -24,7 +33,13 @@ export function marketWeek(day: string) {
 export function markupPercent(price: string, base: string | null) {
   const sale = cents(price)
   const cost = base === null ? null : cents(base)
-  return sale !== null && sale > 0 && cost !== null && cost > 0 ? (sale - cost) / cost * 100 : null
+  if (sale === null || sale <= 0 || cost === null || cost <= 0) return null
+  // Cálculo exacto a centésimas de porcentaje con redondeo half-up
+  const diff = BigInt(sale - cost)
+  const denom = BigInt(cost)
+  const sign = diff < BigInt(0) ? BigInt(-1) : BigInt(1)
+  const scaled = ((diff < BigInt(0) ? -diff : diff) * BigInt(10000) + denom / BigInt(2)) / denom
+  return Number(sign * scaled) / 100
 }
 
 export function formatMarkup(value: number | null) {
@@ -123,7 +138,8 @@ export function decimalInput(value: string) {
 export function cents(value: string) {
   const normalized = decimalInput(value)
   if (!/^\d{1,10}(?:\.\d{1,2})?$/.test(normalized)) return null
-  return Math.round(Number(normalized) * 100)
+  const [whole, frac = ''] = normalized.split('.')
+  return Number(whole) * 100 + Number(frac.padEnd(2, '0'))
 }
 
 export function salesValue(quantity: string, price: string) {

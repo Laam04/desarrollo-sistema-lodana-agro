@@ -200,7 +200,13 @@ function ForecastPanel({ item, report }: { item: AnalyticsSeries; report: Analyt
             </label>
             <AnalyticsChart label="Previsión de cosecha" unit={item.unit} months={months} lines={[
               { label: 'Cosecha registrada', color: 'green', values: months.map((month) => history.get(month) ?? null) },
-              { label: 'Estimación', color: 'purple', dashed: true, values: months.map((month) => month === lastClosed ? history.get(month) ?? null : predictions.get(month)?.value ?? null) },
+              {
+                label: 'Estimación',
+                color: 'purple',
+                dashed: true,
+                bridgeFrom: history.has(lastClosed) ? { index: months.indexOf(lastClosed), value: history.get(lastClosed)! } : undefined,
+                values: months.map((month) => predictions.get(month)?.value ?? null),
+              },
             ]} band={hasInterval ? {
               low: months.map((month) => predictions.get(month)?.low ?? null),
               high: months.map((month) => predictions.get(month)?.high ?? null),
@@ -248,12 +254,20 @@ export function AnalyticsDashboard({ publicView = false }: { publicView?: boolea
 
   function apply(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!period.from || !period.to || period.from > period.to || monthDistance(period.from, period.to) >= 60) {
-      setFilterError('Selecciona un período válido de hasta 60 meses.')
+    const validMonth = (value: string) => /^20\d{2}-(0[1-9]|1[0-2])$/.test(value)
+    if (
+      !validMonth(period.from) ||
+      !validMonth(period.to) ||
+      period.from > period.to ||
+      (data && period.to > data.latestMonth) ||
+      monthDistance(period.from, period.to) >= 60
+    ) {
+      setFilterError('Selecciona un período válido (AAAA-MM) de hasta 60 meses dentro del rango disponible.')
       return
     }
     setFilterError('')
     setSelected(period)
+    setDraft(null)
   }
 
   return (
@@ -293,7 +307,7 @@ export function AnalyticsDashboard({ publicView = false }: { publicView?: boolea
           <span>{error.message}</span><button type="button" className="font-semibold underline" onClick={() => void mutate()}>Reintentar</button>
         </div>
       )}
-      {(isLoading || (isValidating && selected)) && <p role="status" className="text-sm text-muted-foreground">{data ? 'Actualizando estadísticas…' : 'Cargando estadísticas…'}</p>}
+      {(isLoading || isValidating) && <p role="status" className="text-sm text-muted-foreground">{data ? 'Actualizando estadísticas…' : 'Cargando estadísticas…'}</p>}
       {data && (
         <>
           <div className="flex items-start gap-2 text-xs leading-5 text-muted-foreground">

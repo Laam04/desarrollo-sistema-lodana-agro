@@ -1,2 +1,16 @@
-import { PendingPage } from '@/components/pending-page'
-export default function Page() { return <PendingPage title="Administración" description="La administración de catálogos, usuarios y permisos está pendiente de implementación." /> }
+import { Suspense } from 'react'
+import { redirect } from 'next/navigation'
+import { AdminWorkspace } from '@/components/admin-workspace'
+import { currentActor } from '@/lib/production-api'
+
+export const metadata = { title: 'Administración | Lodana Agro' }
+
+export default async function AdministracionPage() {
+  const profile = await currentActor()
+  if (profile !== 'admin') redirect('/')
+  return (
+    <Suspense>
+      <AdminWorkspace />
+    </Suspense>
+  )
+}

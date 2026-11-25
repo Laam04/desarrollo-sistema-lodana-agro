@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client'
 import { NextResponse } from 'next/server'
-import { prisma } from '@/lib/prisma'
-import { currentActor, ProductionError, productionError, readBody } from '@/lib/production-api'
+import { prisma, runSerializable } from '@/lib/prisma'
+import { ProductionError, productionError, readBody, requireProfile } from '@/lib/production-api'
 import { historyQuery } from '@/lib/production-history'
 import { endOfDay } from '@/lib/production-stock'
 import { parseDate, parsePositiveDecimal } from '@/lib/production-validation'
@@ -15,6 +15,14 @@ const productInclude = {
 const saleInclude = { receptionItem: { include: productInclude } } satisfies Prisma.MarketSaleInclude
 type Product = Prisma.ReceptionItemGetPayload<{ include: typeof productInclude }>
 type Sale = Prisma.MarketSaleGetPayload<{ include: typeof saleInclude }>
+
+const activeSaleParent = {
+  receptionItem: {
+    deletedAt: null,
+    reception: { deletedAt: null, shipment: { deletedAt: null, status: { not: 'CANCELLED' } } },
+    shipmentItem: { deletedAt: null },
+  },
+} satisfies Prisma.MarketSaleWhereInput
 
 function productData(row: Product) {
   return {
@@ -39,10 +47,9 @@ function saleData(row: Sale) {
 }
 
 async function stock(request: Request, date: Date, params: URLSearchParams) {
-  const { take, skip, search, result } = historyQuery(request, 50)
+  const { take, skip, likePattern, result } = historyQuery(request, 50)
   const excludeId = params.get('excludeSaleId')
   const itemId = params.get('itemId')
-  const term = search ? '%' + search.contains + '%' : null
   const nextDay = new Date(date)
   nextDay.setUTCDate(nextDay.getUTCDate() + 1)
   nextDay.setUTCHours(5, 0, 0, 0)
@@ -64,9 +71,9 @@ async function stock(request: Request, date: Date, params: URLSearchParams) {
         AND sh."deletedAt" IS NULL AND sh.status <> 'CANCELLED' AND si."deletedAt" IS NULL
         AND ri."receivedQuantity" > totals.sold
         ${itemId ? Prisma.sql`AND ri.id = ${itemId}` : Prisma.empty}
-        ${term ? Prisma.sql`AND (
-          c.name ILIKE ${term} OR sh.code ILIKE ${term} OR
-          ('REC-' || LPAD(r."receiptNumber"::text, GREATEST(3, LENGTH(r."receiptNumber"::text)), '0')) ILIKE ${term}
+        ${likePattern ? Prisma.sql`AND (
+          c.name ILIKE ${likePattern} ESCAPE '\' OR sh.code ILIKE ${likePattern} ESCAPE '\' OR
+          ('REC-' || LPAD(r."receiptNumber"::text, GREATEST(3, LENGTH(r."receiptNumber"::text)), '0')) ILIKE ${likePattern} ESCAPE '\'
         )` : Prisma.empty}
       ORDER BY r."receivedAt" DESC, ri.id ASC
       LIMIT ${take} OFFSET ${skip ?? 0}
@@ -84,10 +91,12 @@ async function stock(request: Request, date: Date, params: URLSearchParams) {
 }
 
 function spreadsheetCell(value: string) {
-  // Excel interpreta cadenas iniciales como fórmulas incluso dentro de comillas.
-  const safe = !/^-?\d+(?:,\d+)?%?$/.test(value) && /^[\s\uFEFF]*[=+\-@]|^[\t\r\n]/.test(value) ? "'" + value : value
+  // Excel/LibreOffice interpretan cadenas iniciales como fórmulas incluso dentro de comillas.
+  const safe = !/^-?\d+(?:,\d+)?%?$/.test(value) && /^[\s\uFEFF]*[=+\-@|]|^[\t\r\n]/.test(value) ? "'" + value : value
   return '"' + safe.replaceAll('"', '""') + '"'
 }
+
+const maxExportRows = 5000
 
 function exportSheet(rows: Sale[], date: string) {
   const localized = (value: Prisma.Decimal) => value.toFixed(2).replace('.', ',')
@@ -109,6 +118,8 @@ function exportSheet(rows: Sale[], date: string) {
     headers: {
       'Content-Type': 'text/csv; charset=utf-8',
       'Content-Disposition': 'attachment; filename="agro-market-' + date + '.csv"',
+      'Cache-Control': 'private, no-store',
+      'X-Content-Type-Options': 'nosniff',
     },
   })
 }
@@ -139,6 +150,7 @@ async function salesSummary(where: Prisma.MarketSaleWhereInput, from: string, to
 
 export async function GET(request: Request) {
   try {
+    await requireProfile(['reception', 'admin'])
     const params = new URL(request.url).searchParams
     const dateText = params.get('date') ?? marketDay()
     const date = parseDate(dateText)
@@ -147,12 +159,20 @@ export async function GET(request: Request) {
     const summary = params.get('view') === 'summary'
     const weekly = summary || params.get('period') === 'week'
     const { from, to } = weekly ? marketWeek(dateText) : { from: dateText, to: dateText }
-    const where = { cancelledAt: null, date: { gte: new Date(from + 'T00:00:00Z'), lte: endOfDay(new Date(to + 'T00:00:00Z')) } }
+    const where: Prisma.MarketSaleWhereInput = {
+      cancelledAt: null,
+      date: { gte: new Date(from + 'T00:00:00Z'), lte: endOfDay(new Date(to + 'T00:00:00Z')) },
+      ...activeSaleParent,
+    }
     if (summary) return NextResponse.json(await salesSummary(where, from, to))
     if (params.get('export') === 'csv') {
       const rows = await prisma.marketSale.findMany({
         where, include: saleInclude, orderBy: [{ date: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+        take: maxExportRows + 1,
       })
+      if (rows.length > maxExportRows) {
+        throw new ProductionError(`La exportación supera el límite de ${maxExportRows} ventas. Reduce el rango de fechas.`, 413)
+      }
       return exportSheet(rows, weekly ? from + '_a_' + to : dateText)
     }
 
@@ -187,62 +207,90 @@ function draft(data: Record<string, unknown>) {
   return { receptionItemId, date, quantity, unitPrice, total } as const
 }
 
+function saleMatchesDraft(existing: Sale, input: ReturnType<typeof draft>, actor: string) {
+  return (
+    !existing.cancelledAt &&
+    existing.createdBy === actor &&
+    existing.receptionItemId === input.receptionItemId &&
+    existing.date.getTime() === input.date.getTime() &&
+    existing.quantity.eq(input.quantity) &&
+    existing.unitPrice.eq(input.unitPrice)
+  )
+}
+
 async function save(request: Request, editing: boolean) {
   try {
+    const actor = await requireProfile(['reception', 'admin'])
     const body = await readBody(request)
     const input = draft(body)
-    const id = editing ? body.id : body.requestId
-    if (typeof id !== 'string' || !id || (!editing && !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id))) {
+    const rawId = editing ? body.id : body.requestId
+    if (typeof rawId !== 'string' || !rawId || (!editing && !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(rawId))) {
       throw new ProductionError('La solicitud de venta necesita un identificador válido.')
     }
-    const actor = await currentActor()
-    const result = await prisma.$transaction(async (tx) => {
-      const existing = await tx.marketSale.findUnique({ where: { id }, include: saleInclude })
-      if (editing && (!existing || existing.cancelledAt)) throw new ProductionError('La venta ya no está disponible.', 404)
-      if (editing && existing && body.updatedAt !== undefined && existing.updatedAt.toISOString() !== body.updatedAt) {
-        throw new ProductionError('Esta venta cambió. Abre el registro actualizado antes de editarlo.', 409)
-      }
-      if (existing && !editing) {
-        const matches = !existing.cancelledAt && existing.receptionItemId === input.receptionItemId &&
-          existing.date.getTime() === input.date.getTime() && existing.quantity.eq(input.quantity) &&
-          existing.unitPrice.eq(input.unitPrice)
-        if (!matches) throw new ProductionError('La clave de solicitud ya corresponde a otra venta.', 409)
-        return { sale: existing, created: false }
-      }
+    const id = editing ? rawId : rawId.toLowerCase()
+    if (editing && (typeof body.updatedAt !== 'string' || !body.updatedAt)) {
+      throw new ProductionError('Actualiza la venta antes de editarla para evitar sobrescribir cambios.', 400)
+    }
 
-      const product = await tx.receptionItem.findFirst({
-        where: {
-          id: input.receptionItemId, deletedAt: null,
-          reception: { deletedAt: null, shipment: { deletedAt: null, status: { not: 'CANCELLED' } } },
-          shipmentItem: { deletedAt: null },
-        },
-        include: productInclude,
+    try {
+      const result = await runSerializable(async (tx) => {
+        const existing = await tx.marketSale.findUnique({ where: { id }, include: saleInclude })
+        if (editing && (!existing || existing.cancelledAt)) throw new ProductionError('La venta ya no está disponible.', 404)
+        if (editing && existing && existing.updatedAt.toISOString() !== body.updatedAt) {
+          throw new ProductionError('Esta venta cambió. Abre el registro actualizado antes de editarlo.', 409)
+        }
+        if (existing && !editing) {
+          if (!saleMatchesDraft(existing, input, actor)) {
+            throw new ProductionError('La clave de solicitud ya corresponde a otra venta.', 409)
+          }
+          return { sale: existing, created: false }
+        }
+
+        const product = await tx.receptionItem.findFirst({
+          where: {
+            id: input.receptionItemId, deletedAt: null,
+            reception: { deletedAt: null, shipment: { deletedAt: null, status: { not: 'CANCELLED' } } },
+            shipmentItem: { deletedAt: null },
+          },
+          include: productInclude,
+        })
+        if (!product) throw new ProductionError('El producto ya no está disponible en el recibo.', 404)
+        if (marketDay(product.reception.receivedAt) > input.date.toISOString().slice(0, 10)) {
+          throw new ProductionError('La fecha de venta debe ser igual o posterior a la recepción.')
+        }
+        const sold = await tx.marketSale.aggregate({
+          where: { receptionItemId: product.id, cancelledAt: null, ...(editing ? { id: { not: id } } : {}) },
+          _sum: { quantity: true },
+        })
+        const available = product.receivedQuantity.minus(sold._sum.quantity ?? 0)
+        if (available.lt(input.quantity)) {
+          throw new ProductionError(`La cantidad supera el saldo disponible de ${Prisma.Decimal.max(available, 0).toFixed(2)}.`, 409)
+        }
+        const sale = editing
+          ? await tx.marketSale.update({ where: { id }, data: input, include: saleInclude })
+          : await tx.marketSale.create({ data: { id, ...input, createdBy: actor }, include: saleInclude })
+        await tx.auditLog.create({
+          data: {
+            entity: 'MarketSale', entityId: id, action: editing ? 'UPDATE' : 'CREATE', actor,
+            beforeJson: existing ? JSON.parse(JSON.stringify(saleData(existing))) : undefined,
+            afterJson: JSON.parse(JSON.stringify(saleData(sale))),
+          },
+        })
+        return { sale, created: !editing }
       })
-      if (!product) throw new ProductionError('El producto ya no está disponible en el recibo.', 404)
-      if (marketDay(product.reception.receivedAt) > input.date.toISOString().slice(0, 10)) {
-        throw new ProductionError('La fecha de venta debe ser igual o posterior a la recepción.')
+      return NextResponse.json(saleData(result.sale), { status: result.created ? 201 : 200 })
+    } catch (error) {
+      if (!editing && error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        const existing = await prisma.marketSale.findUnique({ where: { id }, include: saleInclude })
+        if (existing) {
+          if (!saleMatchesDraft(existing, input, actor)) {
+            throw new ProductionError('La clave de solicitud ya corresponde a otra venta.', 409)
+          }
+          return NextResponse.json(saleData(existing), { status: 200 })
+        }
       }
-      const sold = await tx.marketSale.aggregate({
-        where: { receptionItemId: product.id, cancelledAt: null, ...(editing ? { id: { not: id } } : {}) },
-        _sum: { quantity: true },
-      })
-      const available = product.receivedQuantity.minus(sold._sum.quantity ?? 0)
-      if (available.lt(input.quantity)) {
-        throw new ProductionError(`La cantidad supera el saldo disponible de ${Prisma.Decimal.max(available, 0).toFixed(2)}.`, 409)
-      }
-      const sale = editing
-        ? await tx.marketSale.update({ where: { id }, data: input, include: saleInclude })
-        : await tx.marketSale.create({ data: { id, ...input, createdBy: actor }, include: saleInclude })
-      await tx.auditLog.create({
-        data: {
-          entity: 'MarketSale', entityId: id, action: editing ? 'UPDATE' : 'CREATE', actor,
-          beforeJson: existing ? JSON.parse(JSON.stringify(saleData(existing))) : undefined,
-          afterJson: JSON.parse(JSON.stringify(saleData(sale))),
-        },
-      })
-      return { sale, created: !editing }
-    }, { isolationLevel: 'Serializable' })
-    return NextResponse.json(saleData(result.sale), { status: result.created ? 201 : 200 })
+      throw error
+    }
   } catch (error) {
     return productionError(error, 'No se pudo guardar la venta.')
   }
@@ -253,21 +301,24 @@ export function PATCH(request: Request) { return save(request, true) }
 
 export async function DELETE(request: Request) {
   try {
+    const actor = await requireProfile(['reception', 'admin'])
     const { id, updatedAt } = await readBody(request)
     if (typeof id !== 'string' || !id) throw new ProductionError('Selecciona la venta que quieres anular.')
-    const actor = await currentActor()
-    await prisma.$transaction(async (tx) => {
+    if (typeof updatedAt !== 'string' || !updatedAt) {
+      throw new ProductionError('Actualiza la venta antes de anularla para evitar conflictos.', 400)
+    }
+    await runSerializable(async (tx) => {
       const sale = await tx.marketSale.findUnique({ where: { id }, include: saleInclude })
       if (!sale) throw new ProductionError('Venta no encontrada.', 404)
       if (sale.cancelledAt) return
-      if (updatedAt !== undefined && sale.updatedAt.toISOString() !== updatedAt) {
+      if (sale.updatedAt.toISOString() !== updatedAt) {
         throw new ProductionError('Esta venta cambió. Revisa el registro actualizado antes de anularlo.', 409)
       }
       await tx.marketSale.update({ where: { id }, data: { cancelledAt: new Date() } })
       await tx.auditLog.create({
         data: { entity: 'MarketSale', entityId: id, action: 'CANCEL', actor, beforeJson: JSON.parse(JSON.stringify(saleData(sale))) },
       })
-    }, { isolationLevel: 'Serializable' })
+    })
     return NextResponse.json({ ok: true })
   } catch (error) {
     return productionError(error, 'No se pudo anular la venta.')
