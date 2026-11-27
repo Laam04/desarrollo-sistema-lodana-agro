@@ -5,7 +5,7 @@ import { useDeferredValue, useRef, useState, type FormEvent } from 'react'
 import { ArrowLeftRight, Banknote, Download, Pencil, Plus, Search, ShoppingBasket, Tag, Trash2 } from 'lucide-react'
 import useSWR from 'swr'
 import { ApiError, createRequestId, formatDate, invalidateProduction, productionFetch } from '@/lib/production-client'
-import { cents, decimalInput, farmSupplier, formatMarkup, isValidIsoDay, marketDay, marketWeek, markupPercent, receiptCode, salesValue, sheetColumns, units, usd, type PageResult, type SaleRow, type SalesDay, type StockRow } from '@/lib/market-data'
+import { cents, decimalInput, farmSupplier, formatMarkup, isValidIsoDay, marketDay, marketWeek, markupPercent, receiptCode, salesValue, sheetColumns, suggestRetailSalePrice, units, usd, type PageResult, type SaleRow, type SalesDay, type StockRow } from '@/lib/market-data'
 import { MarketDialog, MarketError, MarketPagination, marketUi } from '@/components/market-ui'
 
 const salesApi = '/api/market-sales'
@@ -230,7 +230,12 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
   const liveSelection = selection?.rows[0] ?? null
   const available = liveSelection?.available
   const activeMarketPrice = liveSelection?.marketPrice ?? product?.marketPrice ?? null
-  const suggestedSalePrice = activeMarketPrice?.priceUsd ?? product?.customerUnitPrice ?? null
+  const retailSuggestion = suggestRetailSalePrice(
+    activeMarketPrice,
+    product?.productionUnitPrice ?? null,
+    product?.customerUnitPrice ?? null,
+  )
+  const suggestedSalePrice = retailSuggestion?.price ?? null
   const belowProductionCost =
     Boolean(price.trim()) &&
     product?.productionUnitPrice != null &&
@@ -424,8 +429,8 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
                 </p>
               )}
               <p className="mt-1.5 text-xs text-muted-foreground">
-                {suggestedSalePrice
-                  ? <>Precio sugerido: <strong className="text-foreground">{usd(suggestedSalePrice)}</strong>. El sistema solo sugiere este valor; ingresa tú el precio final de venta.</>
+                {retailSuggestion
+                  ? <>Precio sugerido de venta: <strong className="text-foreground">{usd(retailSuggestion.price)}</strong> ({retailSuggestion.reason}). El sistema solo sugiere este valor; ingresa tú el precio final de venta.</>
                   : 'El sistema no fija el precio: escribe libremente el precio final al cliente.'}
               </p>
             </div>

@@ -5,7 +5,7 @@ import useSWR from 'swr'
 import Link from 'next/link'
 import { ArrowLeftRight, ClipboardCheck, Image as ImageIcon, Inbox, PackageCheck, Search, Tag, Truck } from 'lucide-react'
 import { ApiError, createRequestId, formatDate, formatTimestampDate, invalidateProduction, productionFetch } from '@/lib/production-client'
-import { cents, decimalInput, farmSupplier, formatMarkup, markupPercent, receiptCode, units, usd, type MarketReferencePriceRow, type MarketShipment, type MarketShipmentDetail, type PageResult } from '@/lib/market-data'
+import { cents, decimalInput, farmSupplier, formatMarkup, markupPercent, receiptCode, suggestRetailSalePrice, units, usd, type MarketReferencePriceRow, type MarketShipment, type MarketShipmentDetail, type PageResult } from '@/lib/market-data'
 import { receivableStatuses, shipmentStatusLabels } from '@/lib/shipment-status'
 import { MarketDialog, MarketError, MarketPagination, marketUi } from '@/components/market-ui'
 import { ReceiptPhotoModal } from '@/components/receipt-photo-field'
@@ -363,6 +363,11 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
                   Number(draft.saleQuantity) > 0
                     ? (Number(item.estimatedUnitPrice) * Number(draft.quantity)) / Number(draft.saleQuantity)
                     : null
+                const retailSuggestion = suggestRetailSalePrice(
+                  marketRef,
+                  proportionalCost !== null ? proportionalCost.toFixed(2) : item.estimatedUnitPrice,
+                  null,
+                )
 
                 return (
                 <tr key={item.id} className={marketUi.row}>
@@ -442,8 +447,13 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
                   {canReceive && <td className="px-3 py-2 align-top">
                     {Number(item.pendingQuantity) > 0 && (
                       <>
-                        <input inputMode="decimal" maxLength={13} placeholder={marketRef ? `Ref. ${marketRef.priceUsd}` : ''} aria-label={`Precio referencial de ${item.crop.name}`} value={draft.customerUnitPrice} onChange={(event) => change(item.id, { customerUnitPrice: event.target.value })} className={marketUi.input} />
-                        <p className="mt-1 text-xs text-muted-foreground">
+                        <input inputMode="decimal" maxLength={13} placeholder={retailSuggestion ? `Sugerido: ${retailSuggestion.price}` : ''} aria-label={`Precio referencial de ${item.crop.name}`} value={draft.customerUnitPrice} onChange={(event) => change(item.id, { customerUnitPrice: event.target.value })} className={marketUi.input} />
+                        {retailSuggestion && (
+                          <p className="mt-1 text-[11px] font-medium text-emerald-800 dark:text-emerald-300">
+                            Sugerido venta: <strong>{usd(retailSuggestion.price)}</strong> ({retailSuggestion.reason})
+                          </p>
+                        )}
+                        <p className="mt-0.5 text-xs text-muted-foreground">
                           Ganancia sobre costo {formatMarkup(markupPercent(draft.customerUnitPrice, proportionalCost !== null ? proportionalCost.toFixed(2) : item.estimatedUnitPrice))}
                         </p>
                       </>

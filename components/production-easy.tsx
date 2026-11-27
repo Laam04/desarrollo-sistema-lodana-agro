@@ -34,6 +34,7 @@ import {
   PlusCircle,
   Search,
   Sprout,
+  Tag,
   Trash2,
   TrendingDown,
   TriangleAlert,
@@ -49,7 +50,12 @@ import {
   productionFetch,
   today,
 } from '@/lib/production-client'
-import { cents as parseCents, receiptCode } from '@/lib/market-data'
+import {
+  cents as parseCents,
+  receiptCode,
+  suggestShipmentPrice,
+  type MarketReferencePriceRow,
+} from '@/lib/market-data'
 import { editableShipmentStatuses, shipmentStatusLabels } from '@/lib/shipment-status'
 import { ReceiptPhotoField, ReceiptPhotoModal } from '@/components/receipt-photo-field'
 
@@ -1111,6 +1117,17 @@ export function ProductionEasySection({
     section === 'costos' ? '/api/cost-categories?includeInactive=true' : null,
     fetcher,
   )
+  const { data: marketPricesCatalog } = useSWR<{ rows: MarketReferencePriceRow[] }>(
+    section === 'envios' ? '/api/market-prices' : null,
+    fetcher,
+  )
+  const marketPriceByKey = useMemo(() => {
+    const map = new Map<string, MarketReferencePriceRow>()
+    for (const row of marketPricesCatalog?.rows ?? []) {
+      map.set(`${row.cropId}|${row.unitId}`, row)
+    }
+    return map
+  }, [marketPricesCatalog])
   const activeCategories = categories.filter(
     (c) => c.active || c.id === editingRecord?.category?.id,
   )
@@ -2376,6 +2393,7 @@ export function ProductionEasySection({
                           (l) =>
                             stockKey(l.cropId, l.varietyId, l.productionAreaId, l.unitId) === key,
                         )
+                        const marketRef = marketPriceByKey.get(`${item.cropId}|${item.unitId}`) ?? null
                         return (
                           <div
                             key={key}
@@ -2392,6 +2410,12 @@ export function ProductionEasySection({
                                   {Number(item.available).toFixed(2)} {item.unitName}
                                 </strong>
                               </p>
+                              {marketRef && (
+                                <p className="mt-0.5 inline-flex items-center gap-1 text-xs font-medium text-[#2c6048] dark:text-[#a8d5b3]">
+                                  <Tag className="size-3" aria-hidden />
+                                  Mercado actual: {formatAmount(marketRef.priceUsd)}/{marketRef.unitName}
+                                </p>
+                              )}
                             </div>
                             <button
                               type="button"
@@ -2436,6 +2460,11 @@ export function ProductionEasySection({
                       {shipmentLines.map((line, index) => {
                         const err = shipmentValidation.lineErrors[index]
                         const subtotal = shipmentSubtotal(line.quantity, line.unitPrice)
+                        const marketRef = marketPriceByKey.get(`${line.cropId}|${line.unitId}`) ?? null
+                        const stockMatch = stockByKey.get(
+                          stockKey(line.cropId, line.varietyId, line.productionAreaId, line.unitId),
+                        )
+                        const suggested = suggestShipmentPrice(marketRef, stockMatch?.estimatedUnitPrice)
                         return (
                           <div
                             key={line.uid}
@@ -2499,7 +2528,7 @@ export function ProductionEasySection({
                                   min="0.01"
                                   step="0.01"
                                   required
-                                  placeholder="Ej. 5.00"
+                                  placeholder={suggested ? `Sugerido: ${suggested.price}` : 'Ej. 5.00'}
                                   value={line.unitPrice}
                                   onChange={(e) =>
                                     setShipmentLines((prev) =>
@@ -2512,6 +2541,33 @@ export function ProductionEasySection({
                                 />
                               </label>
                             </div>
+
+                            {(marketRef || suggested) && (
+                              <div className="rounded-xl border border-[#cfe0d2] bg-[#f5faf6] px-3.5 py-2.5 text-xs dark:border-[#2d4537] dark:bg-[#142019]">
+                                <div className="flex flex-wrap items-center gap-1.5 font-semibold text-[#1f4834] dark:text-[#c9e7d0]">
+                                  <Tag className="size-3.5 shrink-0" aria-hidden />
+                                  {marketRef ? (
+                                    <span>
+                                      Mercado actual: <strong>{formatAmount(marketRef.priceUsd)}</strong>/{marketRef.unitName}
+                                      {(marketRef.minPriceUsd || marketRef.maxPriceUsd) && (
+                                        <span className="font-normal text-muted-foreground">
+                                          {' '}(rango {marketRef.minPriceUsd ? formatAmount(marketRef.minPriceUsd) : '—'} – {marketRef.maxPriceUsd ? formatAmount(marketRef.maxPriceUsd) : '—'})
+                                        </span>
+                                      )}
+                                    </span>
+                                  ) : (
+                                    <span>Referencia de precio de envío</span>
+                                  )}
+                                </div>
+                                {suggested && (
+                                  <p className="mt-1 text-muted-foreground">
+                                    Precio sugerido de envío:{' '}
+                                    <strong className="text-foreground">{formatAmount(suggested.price)}</strong>{' '}
+                                    ({suggested.reason}). Es solo una guía; tú decides el precio final.
+                                  </p>
+                                )}
+                              </div>
+                            )}
 
                             {err.type === 'exceeds' && (
                               <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-red-50 px-3.5 py-2.5 text-sm text-red-800 dark:bg-red-950/40 dark:text-red-200">

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { buildForecast, describeSeasonality, shiftMonth } from '../lib/analytics-model.ts'
 import { parseDate } from '../lib/production-validation.ts'
-import { cents, isValidIsoDay, marketWeek, markupPercent, salesValue } from '../lib/market-data.ts'
+import { cents, isValidIsoDay, marketWeek, markupPercent, salesValue, suggestRetailSalePrice, suggestShipmentPrice } from '../lib/market-data.ts'
 import { createSession, parseSession, readSession } from '../lib/profile-session.ts'
 
 test('parseDate acota fechas al rango 2000-2100 y rechaza años inválidos', () => {
@@ -28,6 +28,34 @@ test('cents, salesValue y markupPercent evitan errores de punto flotante', () =>
   assert.equal(salesValue('1.15', '0.10'), 0.12)
   assert.equal(markupPercent('8.50', '6.50'), 30.77)
   assert.equal(markupPercent('10.00', '0'), null)
+})
+
+test('suggestShipmentPrice y suggestRetailSalePrice separan envío y venta con protección de margen', () => {
+  assert.deepEqual(
+    suggestShipmentPrice({ priceUsd: '7.20', minPriceUsd: '6.80' }, '6.50'),
+    { price: '6.80', reason: 'mínimo del mercado actual' },
+  )
+  assert.deepEqual(
+    suggestShipmentPrice({ priceUsd: '10.00', minPriceUsd: null }, '6.50'),
+    { price: '8.50', reason: '85% del precio de mercado actual' },
+  )
+  assert.deepEqual(
+    suggestShipmentPrice(null, '6.50'),
+    { price: '6.50', reason: 'precio estimado de la cosecha' },
+  )
+  assert.deepEqual(
+    suggestRetailSalePrice({ priceUsd: '7.20' }, '6.00', null),
+    { price: '7.20', reason: 'precio real del mercado actual' },
+  )
+  // Si el envío vino alto ($7.00 -> piso +15% = $8.05 > mercado $7.20), protege contra pérdida
+  assert.deepEqual(
+    suggestRetailSalePrice({ priceUsd: '7.20' }, '7.00', null),
+    { price: '8.05', reason: 'costo de producción + 15% (protección sobre mercado actual)' },
+  )
+  assert.deepEqual(
+    suggestRetailSalePrice(null, '10.00', null),
+    { price: '11.50', reason: 'costo de producción + 15%' },
+  )
 })
 
 test('buildForecast descarta meses futuros y deduplica meses repetidos', () => {

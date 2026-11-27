@@ -4,7 +4,7 @@ import useSWR from "swr";
 import { CostCategoryField } from "@/components/cost-category-field";
 import { ReceiptPhotoField, ReceiptPhotoModal } from "@/components/receipt-photo-field";
 import { createRequestId, formatDate, invalidateProduction, productionFetch, today } from "@/lib/production-client";
-import { cents as parseCents, receiptCode } from "@/lib/market-data";
+import { cents as parseCents, receiptCode, suggestShipmentPrice, type MarketReferencePriceRow } from "@/lib/market-data";
 import { editableShipmentStatuses, shipmentStatusLabels } from "@/lib/shipment-status";
 import {
   useDeferredValue,
@@ -523,6 +523,17 @@ export function ProductionRecords({ active }: { active: string }) {
 
   const { data: crops = [], error: cropsError } = useSWR<Crop[]>("/api/crops", fetcher);
   const { data: units = [], error: unitsError } = useSWR<Unit[]>(isCosts || isLosses ? null : "/api/units", fetcher);
+  const { data: marketPricesCatalog } = useSWR<{ rows: MarketReferencePriceRow[] }>(
+    isShipments ? "/api/market-prices" : null,
+    fetcher,
+  );
+  const marketPriceByKey = useMemo(() => {
+    const map = new Map<string, MarketReferencePriceRow>();
+    for (const row of marketPricesCatalog?.rows ?? []) {
+      map.set(`${row.cropId}|${row.unitId}`, row);
+    }
+    return map;
+  }, [marketPricesCatalog]);
   const [harvestSearch, setHarvestSearch] = useState("");
   const deferredHarvestSearch = useDeferredValue(harvestSearch);
   const { data: harvestResults, error: harvestOptionsError } = useSWR<HistoryPage>(
@@ -1919,22 +1930,37 @@ export function ProductionRecords({ active }: { active: string }) {
                             />
                           </label>
 
-                          <label className="grid gap-1 text-xs font-medium">
-                            Precio unit. (USD)
-                            <input
-                              required
-                              min="0.01"
-                              step="0.01"
-                              type="number"
-                              value={line.unitPrice}
-                              onChange={(event) =>
-                                updateShipmentLine(index, {
-                                  unitPrice: event.target.value,
-                                })
-                              }
-                              className={inputCls}
-                            />
-                          </label>
+                          {(() => {
+                            const marketRef = line.cropId
+                              ? marketPriceByKey.get(`${line.cropId}|${lineUnitId(line)}`) ?? null
+                              : null;
+                            const suggested = suggestShipmentPrice(marketRef, stock?.estimatedUnitPrice);
+                            return (
+                              <label className="grid gap-1 text-xs font-medium">
+                                Precio unit. (USD)
+                                <input
+                                  required
+                                  min="0.01"
+                                  step="0.01"
+                                  type="number"
+                                  placeholder={suggested ? `Sugerido: ${suggested.price}` : undefined}
+                                  value={line.unitPrice}
+                                  onChange={(event) =>
+                                    updateShipmentLine(index, {
+                                      unitPrice: event.target.value,
+                                    })
+                                  }
+                                  className={inputCls}
+                                />
+                                {(marketRef || suggested) && (
+                                  <span className="text-[11px] font-normal text-muted-foreground">
+                                    {marketRef && <>Mercado: {formatAmount(marketRef.priceUsd)} · </>}
+                                    {suggested && <>Sugerido envío: <strong>{formatAmount(suggested.price)}</strong></>}
+                                  </span>
+                                )}
+                              </label>
+                            );
+                          })()}
                         </div>
 
                         {line.cropId && (
