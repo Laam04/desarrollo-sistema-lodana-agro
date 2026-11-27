@@ -4,7 +4,7 @@ import { prisma, runSerializable } from '@/lib/prisma'
 import { isRecord, ProductionError, productionError, readBody, requireProfile } from '@/lib/production-api'
 import { historyQuery } from '@/lib/production-history'
 import { marketDay } from '@/lib/market-data'
-import { cleanName, normalizeName, parsePositiveDecimal } from '@/lib/production-validation'
+import { cleanName, normalizeCatalogName, parsePositiveDecimal } from '@/lib/production-validation'
 import { receivableStatuses } from '@/lib/shipment-status'
 
 const receptionShipmentInclude = {
@@ -91,7 +91,16 @@ function receptionMatches(
     receivedBy: string | null
     notes: string | null
     closesWithDifferences: boolean
-    items: { deletedAt: Date | null; shipmentItemId: string; receivedQuantity: Prisma.Decimal; customerUnitPrice: Prisma.Decimal | null; notes: string | null }[]
+    items: {
+      deletedAt: Date | null
+      shipmentItemId: string
+      receivedQuantity: Prisma.Decimal
+      customerUnitPrice: Prisma.Decimal | null
+      saleUnitId: string | null
+      saleQuantity: Prisma.Decimal | null
+      saleUnit?: { name: string } | null
+      notes: string | null
+    }[]
   },
   params: { shipmentId: string; actor: string; notes: string | null; closesWithDifferences: boolean; items: ReceptionInputItem[] },
 ) {
@@ -102,16 +111,29 @@ function receptionMatches(
     existing.notes === params.notes &&
     existing.items.length === params.items.length &&
     params.items.every((item) =>
-      existing.items.some(
-        (saved) =>
+      existing.items.some((saved) => {
+        const saleUnitMatches =
+          item.saleQuantity === null
+            ? saved.saleQuantity === null && saved.saleUnitId === null
+            : Boolean(
+                saved.saleQuantity?.eq(item.saleQuantity) &&
+                  (item.saleUnitId
+                    ? saved.saleUnitId === item.saleUnitId
+                    : item.saleUnitName
+                      ? normalizeCatalogName(saved.saleUnit?.name ?? '') === normalizeCatalogName(item.saleUnitName)
+                      : false),
+              )
+        return (
           !saved.deletedAt &&
           saved.shipmentItemId === item.shipmentItemId &&
           saved.receivedQuantity.eq(item.receivedQuantity) &&
           saved.notes === item.notes &&
+          saleUnitMatches &&
           (item.customerUnitPrice === null
             ? saved.customerUnitPrice === null
-            : saved.customerUnitPrice?.eq(item.customerUnitPrice)),
-      ),
+            : saved.customerUnitPrice?.eq(item.customerUnitPrice))
+        )
+      }),
     )
   )
 }
@@ -209,7 +231,7 @@ export async function POST(request: Request) {
         if (!shipment) throw new ProductionError('Envío no encontrado.', 404)
         const existing = await tx.reception.findUnique({
           where: { id },
-          include: { items: { where: { deletedAt: null } } },
+          include: { items: { where: { deletedAt: null }, include: { saleUnit: { select: { name: true } } } } },
         })
         if (existing) {
           if (!receptionMatches(existing, matchParams)) {
@@ -245,7 +267,7 @@ export async function POST(request: Request) {
           ? await tx.unit.findMany({ where: { deletedAt: null }, select: { id: true, name: true } })
           : []
         const unitById = new Map(existingUnits.map((u) => [u.id, u]))
-        const unitByNorm = new Map(existingUnits.map((u) => [normalizeName(u.name), u]))
+        const unitByNorm = new Map(existingUnits.map((u) => [normalizeCatalogName(u.name), u]))
 
         const createItems = []
         for (const item of items) {
@@ -257,14 +279,14 @@ export async function POST(request: Request) {
           if (item.saleQuantity && (item.saleUnitId || item.saleUnitName)) {
             let targetUnit = item.saleUnitId ? unitById.get(item.saleUnitId) ?? null : null
             if (!targetUnit && item.saleUnitName) {
-              targetUnit = unitByNorm.get(normalizeName(item.saleUnitName)) ?? null
+              targetUnit = unitByNorm.get(normalizeCatalogName(item.saleUnitName)) ?? null
               if (!targetUnit) {
                 targetUnit = await tx.unit.create({
                   data: { name: item.saleUnitName.toLowerCase().slice(0, 40), active: true },
                   select: { id: true, name: true },
                 })
                 unitById.set(targetUnit.id, targetUnit)
-                unitByNorm.set(normalizeName(targetUnit.name), targetUnit)
+                unitByNorm.set(normalizeCatalogName(targetUnit.name), targetUnit)
               }
             }
             if (!targetUnit) throw new ProductionError('Selecciona o escribe una unidad de venta válida.')
@@ -322,7 +344,7 @@ export async function POST(request: Request) {
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
         const [existing, shipment] = await Promise.all([
-          prisma.reception.findUnique({ where: { id }, include: { items: { where: { deletedAt: null } } } }),
+          prisma.reception.findUnique({ where: { id }, include: { items: { where: { deletedAt: null }, include: { saleUnit: { select: { name: true } } } } } }),
           prisma.shipment.findFirst({ where: { id: shipmentId, deletedAt: null }, include: receptionShipmentInclude }),
         ])
         if (existing && shipment) {

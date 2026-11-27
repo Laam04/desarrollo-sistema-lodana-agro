@@ -274,6 +274,7 @@ export async function getAdminOperations() {
         receptionItem: {
           select: {
             reception: { select: { receiptNumber: true } },
+            saleUnit: { select: { name: true } },
             shipmentItem: { select: { crop: { select: { name: true } }, unit: { select: { name: true } } } },
           },
         },
@@ -491,7 +492,7 @@ export async function getAdminOperations() {
       cancelledAt: row.cancelledAt?.toISOString() ?? null,
       receiptNumber: row.receptionItem.reception.receiptNumber,
       crop: row.receptionItem.shipmentItem.crop.name,
-      unit: row.receptionItem.shipmentItem.unit.name,
+      unit: row.receptionItem.saleUnit?.name ?? row.receptionItem.shipmentItem.unit.name,
       quantity: row.quantity.toNumber(),
       totalUsd: row.total.toNumber(),
       createdBy: row.createdBy,

@@ -2,7 +2,7 @@ import { Prisma } from '@prisma/client'
 import { NextResponse } from 'next/server'
 import { prisma, runSerializable } from '@/lib/prisma'
 import { ProductionError, productionError, readBody, requireProfile } from '@/lib/production-api'
-import { cleanName, normalizeName, parsePositiveDecimal } from '@/lib/production-validation'
+import { cleanName, normalizeCatalogName, parsePositiveDecimal } from '@/lib/production-validation'
 
 export async function POST(request: Request) {
   try {
@@ -48,7 +48,7 @@ export async function POST(request: Request) {
         : null
       if (!targetUnit && targetUnitName) {
         const allUnits = await tx.unit.findMany({ where: { deletedAt: null }, select: { id: true, name: true } })
-        targetUnit = allUnits.find((u) => normalizeName(u.name) === normalizeName(targetUnitName)) ?? null
+        targetUnit = allUnits.find((u) => normalizeCatalogName(u.name) === normalizeCatalogName(targetUnitName)) ?? null
         if (!targetUnit) {
           targetUnit = await tx.unit.create({
             data: { name: targetUnitName.toLowerCase().slice(0, 40), active: true },

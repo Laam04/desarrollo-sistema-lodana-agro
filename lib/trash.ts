@@ -77,8 +77,14 @@ export async function moveToTrash(tx: Transaction, entityType: Entity, id: strin
 
   const purgeAt = new Date(deletedAt)
   purgeAt.setUTCDate(purgeAt.getUTCDate() + 60)
+  const sanitizedSnapshot = JSON.parse(JSON.stringify(record)) as Record<string, unknown>
+  for (const heavyField of ['receiptImage', 'evidenceImage', 'noteImage']) {
+    if (heavyField in sanitizedSnapshot) {
+      delete sanitizedSnapshot[heavyField]
+    }
+  }
   await tx.trashEntry.create({
-    data: { entityType, entityId: id, groupId, deletedAt, purgeAt, deletedBy, snapshotJson: JSON.parse(JSON.stringify(record)) },
+    data: { entityType, entityId: id, groupId, deletedAt, purgeAt, deletedBy, snapshotJson: sanitizedSnapshot as Prisma.InputJsonValue },
   })
   return { id, groupId, deletedAt, purgeAt }
 }

@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server'
 import { prisma, runSerializable } from '@/lib/prisma'
 import { ProductionError, productionError, readBody, requireProfile } from '@/lib/production-api'
 import { marketDay } from '@/lib/market-data'
-import { cleanName, normalizeName, parseDate, parsePositiveDecimal } from '@/lib/production-validation'
+import { cleanName, normalizeCatalogName, parseDate, parsePositiveDecimal } from '@/lib/production-validation'
 
 function parseCsvLine(line: string, delimiter: string): string[] {
   const cells: string[] = []
@@ -108,6 +108,9 @@ export async function POST(request: Request) {
     if (!cropId || (!unitIdInput && !unitNameInput) || !priceUsd || !effectiveDate) {
       throw new ProductionError('Selecciona cultivo, unidad, precio de mercado positivo y fecha válida.')
     }
+    if (effectiveDate.toISOString().slice(0, 10) > marketDay()) {
+      throw new ProductionError('La fecha de referencia no puede ser posterior a hoy.')
+    }
     if ((body.minPriceUsd && minPriceUsd === null) || (body.maxPriceUsd && maxPriceUsd === null)) {
       throw new ProductionError('Los precios mínimo y máximo deben ser valores positivos de hasta dos decimales.')
     }
@@ -125,7 +128,7 @@ export async function POST(request: Request) {
       if (!unit && unitNameInput) {
         const lower = unitNameInput.toLowerCase()
         const existingUnits = await tx.unit.findMany({ where: { deletedAt: null }, select: { id: true, name: true } })
-        unit = existingUnits.find((u) => normalizeName(u.name) === normalizeName(lower)) ?? null
+        unit = existingUnits.find((u) => normalizeCatalogName(u.name) === normalizeCatalogName(lower)) ?? null
         if (!unit) {
           unit = await tx.unit.create({
             data: { name: lower.slice(0, 40), active: true },
@@ -235,19 +238,20 @@ export async function PUT(request: Request) {
     }
 
     const delimiter = rawLines[0].includes(';') && !rawLines[0].includes(',') ? ';' : ','
-    const firstCells = parseCsvLine(rawLines[0], delimiter).map((c) => normalizeName(c))
+    const firstCells = parseCsvLine(rawLines[0], delimiter).map((c) => normalizeCatalogName(c))
     const hasHeader =
       firstCells.some((c) => c.includes('cultivo') || c.includes('producto')) &&
       firstCells.some((c) => c.includes('precio'))
 
     const dataLines = hasHeader ? rawLines.slice(1) : rawLines
-    const defaultDate = parseDate(marketDay())!
+    const todayIso = marketDay()
+    const defaultDate = parseDate(todayIso)!
 
     const summary = await runSerializable(async (tx) => {
       const crops = await tx.crop.findMany({ where: { deletedAt: null }, select: { id: true, name: true, normalizedName: true } })
       const units = await tx.unit.findMany({ where: { deletedAt: null }, select: { id: true, name: true } })
-      const cropByNorm = new Map(crops.map((c) => [c.normalizedName, c]))
-      const unitByNorm = new Map(units.map((u) => [normalizeName(u.name), u]))
+      const cropByNorm = new Map(crops.map((c) => [normalizeCatalogName(c.normalizedName), c]))
+      const unitByNorm = new Map(units.map((u) => [normalizeCatalogName(u.name), u]))
 
       let imported = 0
       const errors: string[] = []
@@ -268,21 +272,29 @@ export async function PUT(request: Request) {
           errors.push(`Fila ${lineNo}: faltan datos válidos (cultivo, unidad y precio positivo).`)
           continue
         }
+        if (dateVal.toISOString().slice(0, 10) > todayIso) {
+          errors.push(`Fila ${lineNo}: la fecha de referencia no puede ser posterior a hoy.`)
+          continue
+        }
+        if (minPrice !== null && maxPrice !== null && minPrice > maxPrice) {
+          errors.push(`Fila ${lineNo}: el precio mínimo (${minPrice}) supera al máximo (${maxPrice}).`)
+          continue
+        }
 
-        const crop = cropByNorm.get(normalizeName(cropRaw))
+        const crop = cropByNorm.get(normalizeCatalogName(cropRaw))
         if (!crop) {
           errors.push(`Fila ${lineNo}: cultivo «${cropRaw}» no encontrado en el catálogo.`)
           continue
         }
 
-        let unit = unitByNorm.get(normalizeName(unitRaw))
+        let unit = unitByNorm.get(normalizeCatalogName(unitRaw))
         if (!unit) {
           const createdUnit = await tx.unit.create({
             data: { name: unitRaw.toLowerCase().slice(0, 40), active: true },
             select: { id: true, name: true },
           })
           unit = createdUnit
-          unitByNorm.set(normalizeName(createdUnit.name), createdUnit)
+          unitByNorm.set(normalizeCatalogName(createdUnit.name), createdUnit)
         }
 
         await tx.marketReferencePrice.upsert({
