@@ -308,9 +308,10 @@ export async function getAdminOperations() {
         AND (COALESCE(l.lost, 0) + COALESCE(a.allocated, 0)) > h.quantity
       LIMIT 10
     `,
-    // Integrity check 2: Reception items sold beyond received quantity
+    // Integrity check 2: Reception items sold or converted beyond effective received quantity
     prisma.$queryRaw<{ id: string; receiptNumber: number; excess: Prisma.Decimal }[]>`
-      SELECT ri.id, r."receiptNumber", (COALESCE(v.sold, 0) - ri."receivedQuantity") AS excess
+      SELECT ri.id, r."receiptNumber",
+        (COALESCE(v.sold, 0) + COALESCE(c.converted, 0) - COALESCE(ri."saleQuantity", ri."receivedQuantity")) AS excess
       FROM "ReceptionItem" ri
       JOIN "Reception" r ON r.id = ri."receptionId"
       LEFT JOIN (
@@ -319,8 +320,14 @@ export async function getAdminOperations() {
         WHERE "cancelledAt" IS NULL
         GROUP BY "receptionItemId"
       ) v ON v."receptionItemId" = ri.id
+      LEFT JOIN (
+        SELECT "parentItemId", SUM("convertedFromQty") AS converted
+        FROM "ReceptionItem"
+        WHERE "deletedAt" IS NULL AND "parentItemId" IS NOT NULL
+        GROUP BY "parentItemId"
+      ) c ON c."parentItemId" = ri.id
       WHERE ri."deletedAt" IS NULL AND r."deletedAt" IS NULL
-        AND COALESCE(v.sold, 0) > ri."receivedQuantity"
+        AND (COALESCE(v.sold, 0) + COALESCE(c.converted, 0)) > COALESCE(ri."saleQuantity", ri."receivedQuantity")
       LIMIT 10
     `,
     // Integrity check 3: Shipment items received beyond shipped quantity

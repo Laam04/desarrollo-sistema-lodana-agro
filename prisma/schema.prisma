@@ -27,12 +27,13 @@ model Crop {
   updatedAt          DateTime  @updatedAt
   deletedAt          DateTime?
 
-  unit            Unit?            @relation(fields: [unitId], references: [id])
-  varieties       Variety[]
-  productionAreas ProductionArea[]
-  harvests        Harvest[]
-  shipmentItems   ShipmentItem[]
-  costAllocations CostAllocation[]
+  unit                 Unit?                  @relation(fields: [unitId], references: [id])
+  varieties            Variety[]
+  productionAreas      ProductionArea[]
+  harvests             Harvest[]
+  shipmentItems        ShipmentItem[]
+  costAllocations      CostAllocation[]
+  marketReferencePrices MarketReferencePrice[]
 
   @@index([active, createdAt])
   @@index([unitId])
@@ -96,9 +97,11 @@ model Unit {
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
-  crops         Crop[]
-  harvests      Harvest[]
-  shipmentItems ShipmentItem[]
+  crops                 Crop[]
+  harvests              Harvest[]
+  shipmentItems         ShipmentItem[]
+  saleReceptionItems    ReceptionItem[]        @relation("ReceptionItemSaleUnit")
+  marketReferencePrices MarketReferencePrice[]
 
   @@index([active])
 }
@@ -314,20 +317,55 @@ model Reception {
 }
 
 model ReceptionItem {
-  id               String    @id @default(cuid())
-  receptionId      String
-  shipmentItemId   String
-  receivedQuantity Decimal   @db.Decimal(12, 2)
-  customerUnitPrice Decimal? @db.Decimal(12, 2)
-  notes            String?
-  deletedAt        DateTime?
+  id                String    @id @default(cuid())
+  receptionId       String
+  shipmentItemId    String
+  receivedQuantity  Decimal   @db.Decimal(12, 2)
+  customerUnitPrice Decimal?  @db.Decimal(12, 2)
+  notes             String?
+  saleUnitId        String?
+  saleQuantity      Decimal?  @db.Decimal(12, 2)
+  saleUnitCost      Decimal?  @db.Decimal(12, 4)
+  parentItemId      String?
+  convertedFromQty  Decimal?  @db.Decimal(12, 2)
+  createdAt         DateTime  @default(now())
+  deletedAt         DateTime?
 
-  reception    Reception    @relation(fields: [receptionId], references: [id])
-  shipmentItem ShipmentItem @relation(fields: [shipmentItemId], references: [id])
+  reception    Reception       @relation(fields: [receptionId], references: [id])
+  shipmentItem ShipmentItem    @relation(fields: [shipmentItemId], references: [id])
+  saleUnit     Unit?           @relation("ReceptionItemSaleUnit", fields: [saleUnitId], references: [id])
+  parentItem   ReceptionItem?  @relation("ReceptionItemConversions", fields: [parentItemId], references: [id])
+  conversions  ReceptionItem[] @relation("ReceptionItemConversions")
   sales        MarketSale[]
 
-  @@unique([receptionId, shipmentItemId])
+  @@index([receptionId, shipmentItemId])
   @@index([shipmentItemId])
+  @@index([parentItemId])
+  @@index([saleUnitId])
+}
+
+model MarketReferencePrice {
+  id            String   @id @default(cuid())
+  cropId        String
+  unitId        String
+  marketName    String   @default("Mercado local (Manabí)")
+  source        String   @default("Referencia local")
+  priceUsd      Decimal  @db.Decimal(12, 2)
+  minPriceUsd   Decimal? @db.Decimal(12, 2)
+  maxPriceUsd   Decimal? @db.Decimal(12, 2)
+  effectiveDate DateTime
+  notes         String?
+  updatedBy     String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  crop Crop @relation(fields: [cropId], references: [id])
+  unit Unit @relation(fields: [unitId], references: [id])
+
+  @@unique([cropId, unitId])
+  @@index([cropId])
+  @@index([unitId])
+  @@index([effectiveDate])
 }
 
 enum MarketPayment {

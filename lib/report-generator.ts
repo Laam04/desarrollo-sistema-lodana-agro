@@ -571,6 +571,8 @@ async function queryMarketSalesData(from: string, to: string, cropId: string | n
       include: {
         receptionItem: {
           select: {
+            saleUnitCost: true,
+            saleUnit: { select: { name: true } },
             shipmentItem: {
               select: {
                 estimatedUnitPrice: true,
@@ -610,7 +612,8 @@ async function queryMarketSalesData(from: string, to: string, cropId: string | n
 
   for (const sale of activeSales) {
     const si = sale.receptionItem.shipmentItem
-    const unit = si.unit.name
+    const unit = sale.receptionItem.saleUnit?.name ?? si.unit.name
+    const unitCost = sale.receptionItem.saleUnitCost ?? si.estimatedUnitPrice
     const productLabel = [si.crop.name, si.variety?.name].filter(Boolean).join(' · ')
     const qty = sale.quantity.toNumber()
     const total = sale.total.toNumber()
@@ -618,8 +621,8 @@ async function queryMarketSalesData(from: string, to: string, cropId: string | n
     totalSalesUsd = totalSalesUsd.plus(sale.total)
 
     let saleProfit: number | null = null
-    if (si.estimatedUnitPrice && si.estimatedUnitPrice.gt(0)) {
-      const p = sale.total.minus(si.estimatedUnitPrice.mul(sale.quantity).toDecimalPlaces(2))
+    if (unitCost && unitCost.gt(0)) {
+      const p = sale.total.minus(unitCost.mul(sale.quantity).toDecimalPlaces(2))
       grossProfit = grossProfit.plus(p)
       saleProfit = p.toNumber()
     } else {

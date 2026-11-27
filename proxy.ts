@@ -11,6 +11,7 @@ function deny(message: string, status: number) {
 const routeAcl: readonly { prefix: string; roles: readonly Profile[] }[] = [
   { prefix: '/api/receptions', roles: ['reception', 'admin'] },
   { prefix: '/api/market-sales', roles: ['reception', 'admin'] },
+  { prefix: '/api/market-prices', roles: ['reception', 'production', 'admin'] },
   { prefix: '/agro-market', roles: ['reception', 'admin'] },
   { prefix: '/administracion', roles: ['admin'] },
   { prefix: '/api/admin', roles: ['admin'] },

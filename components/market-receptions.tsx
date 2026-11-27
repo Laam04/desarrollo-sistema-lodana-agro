@@ -3,20 +3,36 @@
 import { useDeferredValue, useRef, useState, type FormEvent } from 'react'
 import useSWR from 'swr'
 import Link from 'next/link'
-import { ClipboardCheck, Image as ImageIcon, Inbox, PackageCheck, Search, Truck } from 'lucide-react'
+import { ArrowLeftRight, ClipboardCheck, Image as ImageIcon, Inbox, PackageCheck, Search, Tag, Truck } from 'lucide-react'
 import { ApiError, createRequestId, formatDate, formatTimestampDate, invalidateProduction, productionFetch } from '@/lib/production-client'
-import { cents, decimalInput, farmSupplier, formatMarkup, markupPercent, receiptCode, units, usd, type MarketShipment, type MarketShipmentDetail, type PageResult } from '@/lib/market-data'
+import { cents, decimalInput, farmSupplier, formatMarkup, markupPercent, receiptCode, units, usd, type MarketReferencePriceRow, type MarketShipment, type MarketShipmentDetail, type PageResult } from '@/lib/market-data'
 import { receivableStatuses, shipmentStatusLabels } from '@/lib/shipment-status'
 import { MarketDialog, MarketError, MarketPagination, marketUi } from '@/components/market-ui'
 import { ReceiptPhotoModal } from '@/components/receipt-photo-field'
 
-type DraftLine = { quantity: string; notes: string; customerUnitPrice: string }
+type DraftLine = {
+  quantity: string
+  notes: string
+  customerUnitPrice: string
+  convertUnit: boolean
+  saleUnitId: string
+  saleUnitName: string
+  saleQuantity: string
+}
 type ReceiptRequest = {
   requestId: string
   shipmentId: string
   notes: string
   closesWithDifferences: boolean
-  items: { shipmentItemId: string; receivedQuantity: string; customerUnitPrice: string; notes: string }[]
+  items: {
+    shipmentItemId: string
+    receivedQuantity: string
+    customerUnitPrice: string
+    saleUnitId?: string
+    saleUnitName?: string
+    saleQuantity?: string
+    notes: string
+  }[]
 }
 
 function Status({ status }: { status: string }) {
@@ -114,8 +130,23 @@ export function MarketReceptions({ historical }: { historical: boolean }) {
                             const item = detail.items.find((product) => product.id === entry.shipmentItemId)
                             return (
                               <li key={entry.id} className="rounded-lg bg-muted/50 px-3 py-2">
-                                <strong>{item?.crop.name ?? 'Producto'}</strong> · {units(entry.receivedQuantity)} {item?.unit.name}
-                                {entry.customerUnitPrice != null && <span> · Precio al cliente {usd(entry.customerUnitPrice)}</span>}
+                                <strong>{item?.crop.name ?? 'Producto'}</strong>
+                                {entry.parentItemId ? (
+                                  <>
+                                    {' '}· Conversión a <strong>{units(entry.saleQuantity ?? 0)} {entry.saleUnit?.name}</strong>
+                                    {entry.convertedFromQty && <span> (desde {units(entry.convertedFromQty)})</span>}
+                                  </>
+                                ) : (
+                                  <>
+                                    {' '}· {units(entry.receivedQuantity)} {item?.unit.name}
+                                    {entry.saleUnit && entry.saleQuantity && (
+                                      <span className="ml-1 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200">
+                                        → Venta en {units(entry.saleQuantity)} {entry.saleUnit.name}
+                                      </span>
+                                    )}
+                                  </>
+                                )}
+                                {entry.customerUnitPrice != null && <span> · Precio sugerido {usd(entry.customerUnitPrice)}</span>}
                                 {entry.notes && <p className="break-words text-xs text-muted-foreground">{entry.notes}</p>}
                               </li>
                             )
@@ -154,13 +185,31 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
   const [retryError, setRetryError] = useState('')
   const [photoOpen, setPhotoOpen] = useState(false)
   const replay = useRef<{ draft: string; id: string } | null>(null)
+  const { data: priceCatalog } = useSWR<{ rows: MarketReferencePriceRow[]; units: { id: string; name: string }[] }>(
+    '/api/market-prices',
+    productionFetch,
+  )
+  const unitOptions = priceCatalog?.units ?? []
+  const marketPriceByKey = new Map(
+    (priceCatalog?.rows ?? []).map((row) => [`${row.cropId}|${row.unitId}`, row]),
+  )
 
-  function line(id: string) {
-    return lines[id] ?? { quantity: '', notes: '', customerUnitPrice: '' }
+  function line(id: string): DraftLine {
+    return (
+      lines[id] ?? {
+        quantity: '',
+        notes: '',
+        customerUnitPrice: '',
+        convertUnit: false,
+        saleUnitId: '',
+        saleUnitName: '',
+        saleQuantity: '',
+      }
+    )
   }
 
   function change(id: string, value: Partial<DraftLine>) {
-    setLines((current) => ({ ...current, [id]: { quantity: '', notes: '', customerUnitPrice: '', ...current[id], ...value } }))
+    setLines((current) => ({ ...current, [id]: { ...line(id), ...value } }))
   }
 
   const hasDifference = shipment.items.some((item) => (cents(line(item.id).quantity) ?? 0) < (cents(item.pendingQuantity) ?? 0))
@@ -183,7 +232,27 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
           setError(`Revisa el precio al cliente de ${item.crop.name}. Usa hasta dos decimales.`)
           return
         }
-        items.push({ shipmentItemId: item.id, receivedQuantity: decimalInput(value.quantity), customerUnitPrice: decimalInput(value.customerUnitPrice), notes: value.notes })
+        let saleUnitId: string | undefined
+        let saleUnitName: string | undefined
+        let saleQuantity: string | undefined
+        if (value.convertUnit) {
+          const convertedQty = cents(value.saleQuantity)
+          const hasTargetUnit = value.saleUnitId === '__custom__' ? Boolean(value.saleUnitName.trim()) : Boolean(value.saleUnitId)
+          if (!hasTargetUnit || !convertedQty) {
+            setError(`Para cambiar la presentación de ${item.crop.name}, elige la nueva unidad y la cantidad equivalente.`)
+            return
+          }
+          if (value.saleUnitId === '__custom__') saleUnitName = value.saleUnitName.trim()
+          else saleUnitId = value.saleUnitId
+          saleQuantity = decimalInput(value.saleQuantity)
+        }
+        items.push({
+          shipmentItemId: item.id,
+          receivedQuantity: decimalInput(value.quantity),
+          customerUnitPrice: decimalInput(value.customerUnitPrice),
+          ...(saleQuantity ? { saleUnitId, saleUnitName, saleQuantity } : {}),
+          notes: value.notes,
+        })
       }
     }
     if (!items.length) {
@@ -277,11 +346,35 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
               </tr>
             </thead>
             <tbody>
-              {shipment.items.map((item) => (
+              {shipment.items.map((item) => {
+                const draft = line(item.id)
+                const effectiveUnitId =
+                  draft.convertUnit && draft.saleUnitId && draft.saleUnitId !== '__custom__'
+                    ? draft.saleUnitId
+                    : item.unit.id
+                const marketRef =
+                  item.crop.id && effectiveUnitId
+                    ? marketPriceByKey.get(`${item.crop.id}|${effectiveUnitId}`) ?? null
+                    : null
+                const proportionalCost =
+                  draft.convertUnit &&
+                  item.estimatedUnitPrice &&
+                  Number(draft.quantity) > 0 &&
+                  Number(draft.saleQuantity) > 0
+                    ? (Number(item.estimatedUnitPrice) * Number(draft.quantity)) / Number(draft.saleQuantity)
+                    : null
+
+                return (
                 <tr key={item.id} className={marketUi.row}>
                   <th scope="row" className="min-w-34 px-3 py-3 text-left align-top">
                     <span className="font-semibold">{item.crop.name}</span>
                     <span className="block text-xs font-normal text-muted-foreground">{[item.variety?.name, item.productionArea?.name].filter(Boolean).join(' · ')}</span>
+                    {marketRef && (
+                      <span className="mt-1 inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200">
+                        <Tag className="size-3" aria-hidden />
+                        Mercado: {usd(marketRef.priceUsd)}/{marketRef.unitName}
+                      </span>
+                    )}
                     {item.notes && <span className="block break-words text-xs font-normal text-muted-foreground">{item.notes}</span>}
                   </th>
                   <td className="px-3 py-3 align-top">{item.unit.name}</td>
@@ -289,24 +382,76 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
                   <td className="px-3 py-3 align-top tabular-nums">{units(item.receivedQuantity)}</td>
                   <td className="px-3 py-3 align-top font-medium tabular-nums">{units(item.pendingQuantity)}</td>
                   <td className="whitespace-nowrap px-3 py-3 align-top tabular-nums">{usd(item.estimatedUnitPrice)}</td>
-                  {canReceive && <td className="space-y-1.5 px-3 py-2">
+                  {canReceive && <td className="space-y-1.5 px-3 py-2 align-top">
                     {Number(item.pendingQuantity) > 0 ? (
                       <>
-                        <input inputMode="decimal" maxLength={13} placeholder="0" aria-label={`Cantidad a recibir de ${item.crop.name}`} value={line(item.id).quantity} onChange={(event) => change(item.id, { quantity: event.target.value })} className={marketUi.input} />
-                        <input placeholder="Observación" maxLength={500} aria-label={`Observación de ${item.crop.name}`} value={line(item.id).notes} onChange={(event) => change(item.id, { notes: event.target.value })} className={marketUi.input} />
+                        <input inputMode="decimal" maxLength={13} placeholder="0" aria-label={`Cantidad a recibir de ${item.crop.name}`} value={draft.quantity} onChange={(event) => change(item.id, { quantity: event.target.value })} className={marketUi.input} />
+                        <input placeholder="Observación" maxLength={500} aria-label={`Observación de ${item.crop.name}`} value={draft.notes} onChange={(event) => change(item.id, { notes: event.target.value })} className={marketUi.input} />
+                        <button
+                          type="button"
+                          onClick={() => change(item.id, { convertUnit: !draft.convertUnit })}
+                          className="inline-flex items-center gap-1 text-xs font-semibold text-[#2c6048] hover:underline dark:text-[#a8d5b3]"
+                        >
+                          <ArrowLeftRight className="size-3.5" aria-hidden />
+                          {draft.convertUnit ? 'Cancelar cambio de unidad' : 'Cambiar unidad (ej. fundas → unidades)'}
+                        </button>
+                        {draft.convertUnit && (
+                          <div className="grid gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50/50 p-2.5 dark:border-emerald-900/50 dark:bg-emerald-950/20">
+                            <select
+                              aria-label={`Nueva unidad de venta de ${item.crop.name}`}
+                              value={draft.saleUnitId}
+                              onChange={(event) => change(item.id, { saleUnitId: event.target.value })}
+                              className={marketUi.input}
+                            >
+                              <option value="">Nueva unidad…</option>
+                              {unitOptions.map((u) => (
+                                <option key={u.id} value={u.id}>
+                                  {u.name}
+                                </option>
+                              ))}
+                              <option value="__custom__">+ Otra unidad…</option>
+                            </select>
+                            {draft.saleUnitId === '__custom__' && (
+                              <input
+                                placeholder="Ej. unidades, libras"
+                                maxLength={40}
+                                value={draft.saleUnitName}
+                                onChange={(event) => change(item.id, { saleUnitName: event.target.value })}
+                                className={marketUi.input}
+                              />
+                            )}
+                            <input
+                              inputMode="decimal"
+                              maxLength={13}
+                              placeholder="Cantidad equivalente (ej. 100)"
+                              aria-label={`Cantidad equivalente de ${item.crop.name}`}
+                              value={draft.saleQuantity}
+                              onChange={(event) => change(item.id, { saleQuantity: event.target.value })}
+                              className={marketUi.input}
+                            />
+                            {proportionalCost !== null && (
+                              <p className="text-[11px] text-muted-foreground">
+                                Costo base ajustado: <strong>{usd(proportionalCost.toFixed(2))}</strong> por unidad
+                              </p>
+                            )}
+                          </div>
+                        )}
                       </>
                     ) : <span className="text-xs text-muted-foreground">Completo</span>}
                   </td>}
                   {canReceive && <td className="px-3 py-2 align-top">
                     {Number(item.pendingQuantity) > 0 && (
                       <>
-                        <input inputMode="decimal" maxLength={13} aria-label={`Precio al cliente de ${item.crop.name}`} value={line(item.id).customerUnitPrice} onChange={(event) => change(item.id, { customerUnitPrice: event.target.value })} className={marketUi.input} />
-                        <p className="mt-1 text-xs text-muted-foreground">Ganancia sobre costo {formatMarkup(markupPercent(line(item.id).customerUnitPrice, item.estimatedUnitPrice))}</p>
+                        <input inputMode="decimal" maxLength={13} placeholder={marketRef ? `Ref. ${marketRef.priceUsd}` : ''} aria-label={`Precio referencial de ${item.crop.name}`} value={draft.customerUnitPrice} onChange={(event) => change(item.id, { customerUnitPrice: event.target.value })} className={marketUi.input} />
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          Ganancia sobre costo {formatMarkup(markupPercent(draft.customerUnitPrice, proportionalCost !== null ? proportionalCost.toFixed(2) : item.estimatedUnitPrice))}
+                        </p>
                       </>
                     )}
                   </td>}
                 </tr>
-              ))}
+                )
+              })}
             </tbody>
           </table>
         </div>
@@ -338,7 +483,22 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
           <ul className="grid gap-1.5">
             {review.items.map((row) => {
               const item = shipment.items.find((product) => product.id === row.shipmentItemId)
-              return <li key={row.shipmentItemId} className="flex justify-between gap-3 rounded-lg bg-muted/60 p-2"><span>{item?.crop.name}{item?.productionArea ? ' · ' + item.productionArea.name : ''}</span><strong className="text-right">{units(row.receivedQuantity)} {item?.unit.name}{row.customerUnitPrice && <small className="block">Al cliente {usd(row.customerUnitPrice)}</small>}</strong></li>
+              const targetUnitLabel =
+                row.saleUnitName || unitOptions.find((u) => u.id === row.saleUnitId)?.name
+              return (
+                <li key={row.shipmentItemId} className="flex justify-between gap-3 rounded-lg bg-muted/60 p-2">
+                  <span>{item?.crop.name}{item?.productionArea ? ' · ' + item.productionArea.name : ''}</span>
+                  <strong className="text-right">
+                    {units(row.receivedQuantity)} {item?.unit.name}
+                    {row.saleQuantity && targetUnitLabel && (
+                      <small className="block text-emerald-700 dark:text-emerald-300">
+                        → Venta: {units(row.saleQuantity)} {targetUnitLabel}
+                      </small>
+                    )}
+                    {row.customerUnitPrice && <small className="block">Precio ref. {usd(row.customerUnitPrice)}</small>}
+                  </strong>
+                </li>
+              )
             })}
           </ul>
           {retryError && <MarketError message={retryError} />}

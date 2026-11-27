@@ -52,10 +52,10 @@ export function receiptCode(number: number) {
 
 export type ShipmentProduct = {
   id: string
-  crop: { name: string }
+  crop: { id?: string; name: string }
   variety: { name: string } | null
   productionArea: { name: string } | null
-  unit: { name: string }
+  unit: { id?: string; name: string }
   quantity: string
   receivedQuantity: string
   pendingQuantity: string
@@ -80,22 +80,64 @@ export type MarketReceipt = {
   receiptNumber: number
   receivedAt: string
   notes: string | null
-  items: { id: string; shipmentItemId: string; receivedQuantity: string; customerUnitPrice: string | null; notes: string | null }[]
+  items: {
+    id: string
+    shipmentItemId: string
+    receivedQuantity: string
+    customerUnitPrice: string | null
+    notes: string | null
+    saleQuantity?: string | null
+    saleUnitCost?: string | null
+    parentItemId?: string | null
+    convertedFromQty?: string | null
+    saleUnit?: { id: string; name: string } | null
+  }[]
 }
 
 export type MarketShipmentDetail = MarketShipment & { receptions: MarketReceipt[] }
+
+export type MarketReferencePriceRow = {
+  id: string
+  cropId: string
+  cropName: string
+  unitId: string
+  unitName: string
+  priceUsd: string
+  minPriceUsd: string | null
+  maxPriceUsd: string | null
+  marketName: string
+  source: string
+  effectiveDate: string
+  notes: string | null
+  updatedBy: string | null
+  updatedAt: string
+}
+
+export type MarketPriceGuide = {
+  priceUsd: string
+  minPriceUsd: string | null
+  maxPriceUsd: string | null
+  marketName: string
+  source: string
+  effectiveDate: string
+}
 
 export type StockRow = {
   id: string
   receiptNumber: number
   receivedAt: string
   shipmentCode: string
+  cropId?: string
   crop: string
   variety: string | null
   area: string | null
+  unitId?: string
   unit: string
+  originalUnit?: string
+  isConverted?: boolean
   productionUnitPrice: string | null
   customerUnitPrice: string | null
+  marketPrice?: MarketPriceGuide | null
   available: string
 }
 

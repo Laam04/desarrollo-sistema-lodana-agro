@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import { useState } from 'react'
-import { CalendarDays, ChevronRight, ClipboardCheck, History, ShoppingBasket } from 'lucide-react'
+import { CalendarDays, ChevronRight, ClipboardCheck, History, ShoppingBasket, Tag } from 'lucide-react'
 import useSWR from 'swr'
 import { marketDay, units, usd, type MarketSalesSummary, type MarketShipment, type PageResult } from '@/lib/market-data'
 import { formatDate, productionFetch } from '@/lib/production-client'
@@ -67,9 +67,14 @@ export function MarketSummary() {
             Fecha de la semana
             <input type="date" value={date} max={marketDay()} className={marketUi.input} onChange={(event) => { if (event.target.value) setDate(event.target.value) }} />
           </label>
-          <Link href="/agro-market?seccion=historial" prefetch={false} className={marketUi.button}>
-            <History className="size-4" aria-hidden /> Ver historial de recibos
-          </Link>
+          <div className="flex flex-wrap gap-2">
+            <Link href="/agro-market?seccion=precios" prefetch={false} className={marketUi.button}>
+              <Tag className="size-4" aria-hidden /> Precios de mercado
+            </Link>
+            <Link href="/agro-market?seccion=historial" prefetch={false} className={marketUi.button}>
+              <History className="size-4" aria-hidden /> Ver historial de recibos
+            </Link>
+          </div>
         </div>
         {error && <div className="mt-4"><MarketError message={error.message} retry={() => void mutate()} /></div>}
         {!error && !data && <p role="status" className="mt-4 text-sm text-muted-foreground">Cargando resumen…</p>}

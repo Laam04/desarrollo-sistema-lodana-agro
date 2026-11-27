@@ -141,7 +141,7 @@ async function loadMovements(
         AND ${inWindows(Prisma.sql`r."receivedAt"`, receptionDates)} AND r."receivedAt" <= ${receiptCutoff}
       GROUP BY 1, 2, 3
       UNION ALL
-      SELECT to_char(v.date, 'YYYY-MM'), i."cropId", i."unitId", 'sold', SUM(v.quantity), COUNT(*)::int,
+      SELECT to_char(v.date, 'YYYY-MM'), i."cropId", COALESCE(ri."saleUnitId", i."unitId"), 'sold', SUM(v.quantity), COUNT(*)::int,
         NULL, NULL, NULL, NULL, NULL, NULL, NULL
       FROM "MarketSale" v JOIN "ReceptionItem" ri ON ri.id = v."receptionItemId"
       JOIN "Reception" r ON r.id = ri."receptionId"

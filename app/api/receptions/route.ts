@@ -4,7 +4,7 @@ import { prisma, runSerializable } from '@/lib/prisma'
 import { isRecord, ProductionError, productionError, readBody, requireProfile } from '@/lib/production-api'
 import { historyQuery } from '@/lib/production-history'
 import { marketDay } from '@/lib/market-data'
-import { cleanName, parsePositiveDecimal } from '@/lib/production-validation'
+import { cleanName, normalizeName, parsePositiveDecimal } from '@/lib/production-validation'
 import { receivableStatuses } from '@/lib/shipment-status'
 
 const receptionShipmentInclude = {
@@ -12,12 +12,12 @@ const receptionShipmentInclude = {
     where: { deletedAt: null },
     orderBy: { id: 'asc' },
     include: {
-      crop: { select: { name: true } },
+      crop: { select: { id: true, name: true } },
       variety: { select: { name: true } },
       productionArea: { select: { name: true } },
-      unit: { select: { name: true } },
+      unit: { select: { id: true, name: true } },
       receptionItems: {
-        where: { deletedAt: null, reception: { deletedAt: null } },
+        where: { deletedAt: null, parentItemId: null, reception: { deletedAt: null } },
         select: { receivedQuantity: true },
       },
     },
@@ -33,8 +33,19 @@ const receptionLogInclude = {
     id: true, receiptNumber: true, receivedAt: true, receivedBy: true, notes: true, closesWithDifferences: true,
     items: {
       where: { deletedAt: null },
-      orderBy: { id: 'asc' },
-      select: { id: true, shipmentItemId: true, receivedQuantity: true, customerUnitPrice: true, notes: true },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      select: {
+        id: true,
+        shipmentItemId: true,
+        receivedQuantity: true,
+        customerUnitPrice: true,
+        notes: true,
+        saleQuantity: true,
+        saleUnitCost: true,
+        parentItemId: true,
+        convertedFromQty: true,
+        saleUnit: { select: { id: true, name: true } },
+      },
     },
   },
 } satisfies Prisma.ReceptionFindManyArgs
@@ -67,6 +78,9 @@ type ReceptionInputItem = {
   shipmentItemId: string
   receivedQuantity: number
   customerUnitPrice: number | null
+  saleUnitId: string | null
+  saleUnitName: string | null
+  saleQuantity: number | null
   notes: string | null
 }
 
@@ -167,7 +181,22 @@ export async function POST(request: Request) {
       if (row.customerUnitPrice != null && row.customerUnitPrice !== '' && customerUnitPrice === null) {
         throw new ProductionError('Indica un precio al cliente positivo de hasta dos decimales.')
       }
-      return { shipmentItemId: row.shipmentItemId, receivedQuantity, customerUnitPrice, notes: cleanName(row.notes).slice(0, 2000) || null }
+      const saleUnitId = typeof row.saleUnitId === 'string' && row.saleUnitId ? row.saleUnitId : null
+      const saleUnitName = cleanName(row.saleUnitName) || null
+      const hasSaleQty = row.saleQuantity != null && row.saleQuantity !== ''
+      const saleQuantity = hasSaleQty ? parsePositiveDecimal(row.saleQuantity) : null
+      if ((saleUnitId || saleUnitName || hasSaleQty) && ((!saleUnitId && !saleUnitName) || !saleQuantity)) {
+        throw new ProductionError('Para cambiar la presentación al recibir, indica la nueva unidad y la cantidad equivalente.')
+      }
+      return {
+        shipmentItemId: row.shipmentItemId,
+        receivedQuantity,
+        customerUnitPrice,
+        saleUnitId,
+        saleUnitName,
+        saleQuantity,
+        notes: cleanName(row.notes).slice(0, 2000) || null,
+      }
     })
 
     const matchParams = { shipmentId, actor, notes, closesWithDifferences, items }
@@ -202,6 +231,7 @@ export async function POST(request: Request) {
 
         const current = withReceivedTotals(shipment)
         const pending = new Map(current.items.map((item) => [item.id, item.pendingQuantity]))
+        const shipItemById = new Map(shipment.items.map((item) => [item.id, item]))
         for (const item of items) {
           const quantity = pending.get(item.shipmentItemId)
           if (!quantity) throw new ProductionError('Uno de los productos no pertenece al envío.')
@@ -209,6 +239,54 @@ export async function POST(request: Request) {
             throw new ProductionError(`La cantidad recibida supera el saldo pendiente de ${quantity.toFixed(2)}.`, 409)
           }
           pending.set(item.shipmentItemId, quantity.minus(item.receivedQuantity))
+        }
+
+        const existingUnits = items.some((i) => i.saleUnitId || i.saleUnitName)
+          ? await tx.unit.findMany({ where: { deletedAt: null }, select: { id: true, name: true } })
+          : []
+        const unitById = new Map(existingUnits.map((u) => [u.id, u]))
+        const unitByNorm = new Map(existingUnits.map((u) => [normalizeName(u.name), u]))
+
+        const createItems = []
+        for (const item of items) {
+          const shipItem = shipItemById.get(item.shipmentItemId)!
+          let resolvedSaleUnitId: string | null = null
+          let resolvedSaleQty: Prisma.Decimal | null = null
+          let resolvedSaleUnitCost: Prisma.Decimal | null = null
+
+          if (item.saleQuantity && (item.saleUnitId || item.saleUnitName)) {
+            let targetUnit = item.saleUnitId ? unitById.get(item.saleUnitId) ?? null : null
+            if (!targetUnit && item.saleUnitName) {
+              targetUnit = unitByNorm.get(normalizeName(item.saleUnitName)) ?? null
+              if (!targetUnit) {
+                targetUnit = await tx.unit.create({
+                  data: { name: item.saleUnitName.toLowerCase().slice(0, 40), active: true },
+                  select: { id: true, name: true },
+                })
+                unitById.set(targetUnit.id, targetUnit)
+                unitByNorm.set(normalizeName(targetUnit.name), targetUnit)
+              }
+            }
+            if (!targetUnit) throw new ProductionError('Selecciona o escribe una unidad de venta válida.')
+            if (targetUnit.id !== shipItem.unitId || item.saleQuantity !== item.receivedQuantity) {
+              resolvedSaleUnitId = targetUnit.id
+              resolvedSaleQty = new Prisma.Decimal(item.saleQuantity)
+              resolvedSaleUnitCost =
+                shipItem.estimatedUnitPrice && shipItem.estimatedUnitPrice.gt(0)
+                  ? shipItem.estimatedUnitPrice.mul(item.receivedQuantity).div(item.saleQuantity).toDecimalPlaces(4)
+                  : null
+            }
+          }
+
+          createItems.push({
+            shipmentItemId: item.shipmentItemId,
+            receivedQuantity: item.receivedQuantity,
+            customerUnitPrice: item.customerUnitPrice,
+            saleUnitId: resolvedSaleUnitId,
+            saleQuantity: resolvedSaleQty,
+            saleUnitCost: resolvedSaleUnitCost,
+            notes: item.notes,
+          })
         }
 
         const allReceived = [...pending.values()].every((quantity) => quantity.isZero())
@@ -221,7 +299,7 @@ export async function POST(request: Request) {
             notes,
             closesWithDifferences: effectiveClosesWithDifferences,
             receivedBy: actor,
-            items: items.length ? { create: items } : undefined,
+            items: createItems.length ? { create: createItems } : undefined,
           },
           include: { items: { where: { deletedAt: null } } },
         })

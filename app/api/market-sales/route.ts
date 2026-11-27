@@ -10,11 +10,21 @@ import { farmSupplier, marketDay, marketWeek, markupPercent, receiptCode, sheetC
 const productInclude = {
   reception: { select: { receiptNumber: true, receivedAt: true, shipment: { select: { code: true } } } },
   shipmentItem: { include: { crop: true, variety: true, productionArea: true, unit: true } },
+  saleUnit: true,
 } satisfies Prisma.ReceptionItemInclude
 
 const saleInclude = { receptionItem: { include: productInclude } } satisfies Prisma.MarketSaleInclude
 type Product = Prisma.ReceptionItemGetPayload<{ include: typeof productInclude }>
 type Sale = Prisma.MarketSaleGetPayload<{ include: typeof saleInclude }>
+
+type MarketPriceSummary = {
+  priceUsd: string
+  minPriceUsd: string | null
+  maxPriceUsd: string | null
+  marketName: string
+  source: string
+  effectiveDate: string
+}
 
 const activeSaleParent = {
   receptionItem: {
@@ -24,18 +34,37 @@ const activeSaleParent = {
   },
 } satisfies Prisma.MarketSaleWhereInput
 
-function productData(row: Product) {
+function effectiveUnit(row: Product) {
+  return row.saleUnit ?? row.shipmentItem.unit
+}
+
+function effectiveUnitCost(row: {
+  saleUnitCost: Prisma.Decimal | null
+  shipmentItem: { estimatedUnitPrice: Prisma.Decimal | null }
+}) {
+  return row.saleUnitCost ?? row.shipmentItem.estimatedUnitPrice
+}
+
+function productData(row: Product, marketPrice?: MarketPriceSummary | null) {
+  const unit = effectiveUnit(row)
+  const cost = effectiveUnitCost(row)
+  const isConverted = Boolean(row.saleUnitId || row.parentItemId)
   return {
     id: row.id,
     receivedAt: row.reception.receivedAt,
     receiptNumber: row.reception.receiptNumber,
     shipmentCode: row.reception.shipment.code,
+    cropId: row.shipmentItem.cropId,
     crop: row.shipmentItem.crop.name,
     variety: row.shipmentItem.variety?.name ?? null,
     area: row.shipmentItem.productionArea?.name ?? null,
-    unit: row.shipmentItem.unit.name,
-    productionUnitPrice: row.shipmentItem.estimatedUnitPrice,
+    unitId: unit.id,
+    unit: unit.name,
+    originalUnit: row.shipmentItem.unit.name,
+    isConverted,
+    productionUnitPrice: cost ? cost.toDecimalPlaces(2) : null,
     customerUnitPrice: row.customerUnitPrice,
+    marketPrice: marketPrice ?? null,
   }
 }
 
@@ -56,7 +85,8 @@ async function stock(request: Request, date: Date, params: URLSearchParams) {
 
   return prisma.$transaction(async (tx) => {
     const available = await tx.$queryRaw<{ id: string; available: Prisma.Decimal }[]>`
-      SELECT ri.id, ri."receivedQuantity" - totals.sold AS available
+      SELECT ri.id,
+        COALESCE(ri."saleQuantity", ri."receivedQuantity") - totals.sold - conv.converted AS available
       FROM "ReceptionItem" ri
       JOIN "Reception" r ON r.id = ri."receptionId"
       JOIN "Shipment" sh ON sh.id = r."shipmentId"
@@ -67,25 +97,52 @@ async function stock(request: Request, date: Date, params: URLSearchParams) {
         FROM "MarketSale" s WHERE s."receptionItemId" = ri.id AND s."cancelledAt" IS NULL
         ${excludeId ? Prisma.sql`AND s.id <> ${excludeId}` : Prisma.empty}
       ) totals
+      CROSS JOIN LATERAL (
+        SELECT COALESCE(SUM(ch."convertedFromQty"), 0) AS converted
+        FROM "ReceptionItem" ch WHERE ch."parentItemId" = ri.id AND ch."deletedAt" IS NULL
+      ) conv
       WHERE ri."deletedAt" IS NULL AND r."deletedAt" IS NULL AND r."receivedAt" < ${nextDay}
         AND sh."deletedAt" IS NULL AND sh.status <> 'CANCELLED' AND si."deletedAt" IS NULL
-        AND ri."receivedQuantity" > totals.sold
+        AND COALESCE(ri."saleQuantity", ri."receivedQuantity") > totals.sold + conv.converted
         ${itemId ? Prisma.sql`AND ri.id = ${itemId}` : Prisma.empty}
         ${likePattern ? Prisma.sql`AND (
           c.name ILIKE ${likePattern} ESCAPE '\' OR sh.code ILIKE ${likePattern} ESCAPE '\' OR
           ('REC-' || LPAD(r."receiptNumber"::text, GREATEST(3, LENGTH(r."receiptNumber"::text)), '0')) ILIKE ${likePattern} ESCAPE '\'
         )` : Prisma.empty}
-      ORDER BY r."receivedAt" DESC, ri.id ASC
+      ORDER BY r."receivedAt" DESC, ri."createdAt" DESC, ri.id ASC
       LIMIT ${take} OFFSET ${skip ?? 0}
     `
     const products = await tx.receptionItem.findMany({
       where: { id: { in: available.map((row) => row.id) } },
       include: productInclude,
     })
+    const cropIds = [...new Set(products.map((p) => p.shipmentItem.cropId))]
+    const refPrices = cropIds.length
+      ? await tx.marketReferencePrice.findMany({
+          where: { cropId: { in: cropIds } },
+        })
+      : []
+    const refByKey = new Map(
+      refPrices.map((rp) => [
+        `${rp.cropId}|${rp.unitId}`,
+        {
+          priceUsd: rp.priceUsd.toFixed(2),
+          minPriceUsd: rp.minPriceUsd ? rp.minPriceUsd.toFixed(2) : null,
+          maxPriceUsd: rp.maxPriceUsd ? rp.maxPriceUsd.toFixed(2) : null,
+          marketName: rp.marketName,
+          source: rp.source,
+          effectiveDate: rp.effectiveDate.toISOString().slice(0, 10),
+        } satisfies MarketPriceSummary,
+      ]),
+    )
+
     const byId = new Map(products.map((product) => [product.id, product]))
     return result(available.flatMap((row) => {
       const product = byId.get(row.id)
-      return product ? [{ ...productData(product), available: row.available }] : []
+      if (!product) return []
+      const unitId = product.saleUnitId ?? product.shipmentItem.unitId
+      const marketPrice = refByKey.get(`${product.shipmentItem.cropId}|${unitId}`) ?? null
+      return [{ ...productData(product, marketPrice), available: row.available }]
     }))
   }, { isolationLevel: 'RepeatableRead' })
 }
@@ -127,7 +184,17 @@ function exportSheet(rows: Sale[], date: string) {
 async function salesSummary(where: Prisma.MarketSaleWhereInput, from: string, to: string) {
   const rows = await prisma.marketSale.findMany({
     where,
-    select: { date: true, total: true, quantity: true, receptionItem: { select: { shipmentItem: { select: { estimatedUnitPrice: true } } } } },
+    select: {
+      date: true,
+      total: true,
+      quantity: true,
+      receptionItem: {
+        select: {
+          saleUnitCost: true,
+          shipmentItem: { select: { estimatedUnitPrice: true } },
+        },
+      },
+    },
     orderBy: { date: 'asc' },
   })
   const days = new Map<string, { date: string; total: Prisma.Decimal; count: number }>()
@@ -141,7 +208,7 @@ async function salesSummary(where: Prisma.MarketSaleWhereInput, from: string, to
     day.count++
     days.set(date, day)
     total = total.plus(row.total)
-    const cost = row.receptionItem.shipmentItem.estimatedUnitPrice
+    const cost = effectiveUnitCost(row.receptionItem)
     if (cost?.gt(0)) profit = profit.plus(row.total.minus(cost.mul(row.quantity).toDecimalPlaces(2)))
     else missingCost++
   }
@@ -258,11 +325,18 @@ async function save(request: Request, editing: boolean) {
         if (marketDay(product.reception.receivedAt) > input.date.toISOString().slice(0, 10)) {
           throw new ProductionError('La fecha de venta debe ser igual o posterior a la recepción.')
         }
-        const sold = await tx.marketSale.aggregate({
-          where: { receptionItemId: product.id, cancelledAt: null, ...(editing ? { id: { not: id } } : {}) },
-          _sum: { quantity: true },
-        })
-        const available = product.receivedQuantity.minus(sold._sum.quantity ?? 0)
+        const [sold, converted] = await Promise.all([
+          tx.marketSale.aggregate({
+            where: { receptionItemId: product.id, cancelledAt: null, ...(editing ? { id: { not: id } } : {}) },
+            _sum: { quantity: true },
+          }),
+          tx.receptionItem.aggregate({
+            where: { parentItemId: product.id, deletedAt: null },
+            _sum: { convertedFromQty: true },
+          }),
+        ])
+        const capacity = product.saleQuantity ?? product.receivedQuantity
+        const available = capacity.minus(sold._sum.quantity ?? 0).minus(converted._sum.convertedFromQty ?? 0)
         if (available.lt(input.quantity)) {
           throw new ProductionError(`La cantidad supera el saldo disponible de ${Prisma.Decimal.max(available, 0).toFixed(2)}.`, 409)
         }

@@ -1,7 +1,8 @@
 'use client'
 
+import Link from 'next/link'
 import { useDeferredValue, useRef, useState, type FormEvent } from 'react'
-import { Banknote, Download, Pencil, Plus, Search, ShoppingBasket, Trash2 } from 'lucide-react'
+import { ArrowLeftRight, Banknote, Download, Pencil, Plus, Search, ShoppingBasket, Tag, Trash2 } from 'lucide-react'
 import useSWR from 'swr'
 import { ApiError, createRequestId, formatDate, invalidateProduction, productionFetch } from '@/lib/production-client'
 import { cents, decimalInput, farmSupplier, formatMarkup, isValidIsoDay, marketDay, marketWeek, markupPercent, receiptCode, salesValue, sheetColumns, units, usd, type PageResult, type SaleRow, type SalesDay, type StockRow } from '@/lib/market-data'
@@ -205,6 +206,13 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
   const [retrying, setRetrying] = useState(false)
   const replay = useRef<{ draft: string; id: string } | null>(null)
 
+  const [convertOpen, setConvertOpen] = useState(false)
+  const [convertUnitId, setConvertUnitId] = useState('')
+  const [convertUnitName, setConvertUnitName] = useState('')
+  const [convertQty, setConvertQty] = useState('')
+  const [convertBusy, setConvertBusy] = useState(false)
+  const [convertError, setConvertError] = useState('')
+
   const stockParams = { view: 'stock', date, ...(editing ? { excludeSaleId: editing.id } : {}) }
   const { data, error: stockError, mutate: reloadStock } = useSWR<PageResult<StockRow>>(
     salesApi + '?' + new URLSearchParams({ ...stockParams, q: search, page: String(page) }), productionFetch,
@@ -213,15 +221,72 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
     product ? salesApi + '?' + new URLSearchParams({ ...stockParams, itemId: product.id, page: '1' }) : null,
     productionFetch,
   )
+  const { data: priceCatalog } = useSWR<{ units: { id: string; name: string }[] }>(
+    convertOpen ? '/api/market-prices' : null,
+    productionFetch,
+  )
 
   const products = data?.rows ?? []
-  const available = selection?.rows[0]?.available
+  const liveSelection = selection?.rows[0] ?? null
+  const available = liveSelection?.available
+  const activeMarketPrice = liveSelection?.marketPrice ?? product?.marketPrice ?? null
+  const suggestedSalePrice = activeMarketPrice?.priceUsd ?? product?.customerUnitPrice ?? null
+  const belowProductionCost =
+    Boolean(price.trim()) &&
+    product?.productionUnitPrice != null &&
+    Number(price) > 0 &&
+    Number(price) < Number(product.productionUnitPrice)
   const estimate = salesValue(quantity, price)
   const amount = cents(quantity)
   const exceeds = available !== undefined && amount !== null && amount > (cents(available) ?? 0)
   const payload = { date, receptionItemId: product?.id, quantity: decimalInput(quantity), unitPrice: decimalInput(price) }
   const snapshot = JSON.stringify(payload)
   const canRetry = retrying && replay.current?.draft === snapshot
+
+  async function confirmUnitConversion() {
+    if (!product || convertBusy) return
+    setConvertError('')
+    const hasUnit = convertUnitId === '__custom__' ? Boolean(convertUnitName.trim()) : Boolean(convertUnitId)
+    if (!hasUnit || !cents(convertQty)) {
+      setConvertError('Elige la nueva unidad e indica cuántas unidades equivalentes resultan.')
+      return
+    }
+    setConvertBusy(true)
+    try {
+      const converted = await productionFetch<{
+        id: string
+        crop: string
+        fromQuantity: string
+        fromUnit: string
+        toQuantity: string
+        toUnit: string
+      }>('/api/receptions/convert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          receptionItemId: product.id,
+          ...(convertUnitId === '__custom__' ? { targetUnitName: convertUnitName.trim() } : { targetUnitId: convertUnitId }),
+          targetQuantity: decimalInput(convertQty),
+        }),
+      })
+      setConvertOpen(false)
+      setConvertUnitId('')
+      setConvertUnitName('')
+      setConvertQty('')
+      setProduct(null)
+      setQuantity('')
+      setPrice('')
+      void reloadStock()
+      void invalidateProduction(salesApi, '/api/receptions', '/api/market-prices')
+      onSaved(
+        `Presentación cambiada: ${converted.fromQuantity} ${converted.fromUnit} → ${converted.toQuantity} ${converted.toUnit} de ${converted.crop}.`,
+      )
+    } catch (failure) {
+      setConvertError(failure instanceof Error ? failure.message : 'No se pudo cambiar la presentación.')
+    } finally {
+      setConvertBusy(false)
+    }
+  }
 
   async function save(event: FormEvent) {
     event.preventDefault()
@@ -275,7 +340,7 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
             <select required value={product?.id ?? ''} className={marketUi.input} onChange={(event) => {
               const item = products.find((item) => item.id === event.target.value) ?? null
               setProduct(item)
-              setPrice(item?.customerUnitPrice ?? '')
+              if (!editing) setPrice('')
               setError('')
             }}>
               <option value="">Selecciona un producto</option>
@@ -295,20 +360,93 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
         {selectionError && <MarketError message={selectionError.message} retry={() => void reloadSelection()} />}
         {data?.rows.length === 0 && !product && <p className="text-xs text-muted-foreground">{query ? 'No se encontraron productos con saldo para esa búsqueda.' : 'Confirma una recepción para registrar ventas de sus productos.'}</p>}
         {product && (
-          <p className="text-xs text-muted-foreground">
-            {farmSupplier} · {product.shipmentCode}
-            {available !== undefined ? ` · Saldo de ${units(available)} ${product.unit}`
-              : selection ? ' · Producto sin saldo para esta fecha' : ' · Consultando saldo…'}
-          </p>
+          <div className="grid gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+              <p>
+                {farmSupplier} · {product.shipmentCode}
+                {product.isConverted && product.originalUnit ? ` (recibido originalmente en ${product.originalUnit})` : ''}
+                {available !== undefined ? ` · Saldo de ${units(available)} ${product.unit}`
+                  : selection ? ' · Producto sin saldo para esta fecha' : ' · Consultando saldo…'}
+              </p>
+              {!editing && available !== undefined && Number(available) > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConvertError('')
+                    setConvertUnitId('')
+                    setConvertUnitName('')
+                    setConvertQty('')
+                    setConvertOpen(true)
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-[#b7d3bc] bg-emerald-50/70 px-3 py-1.5 text-xs font-semibold text-[#1f4834] transition hover:bg-emerald-100 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200"
+                >
+                  <ArrowLeftRight className="size-3.5" aria-hidden />
+                  Cambiar presentación (ej. fundas → unidades)
+                </button>
+              )}
+            </div>
+
+            {/* Guía de precio del mercado real (solo referencia, nunca impone el valor) */}
+            <div className="rounded-xl border border-[#cfe0d2] bg-[#f5faf6] p-3.5 text-sm dark:border-[#2d4537] dark:bg-[#142019]">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 font-semibold text-[#1f4834] dark:text-[#c9e7d0]">
+                  <Tag className="size-4 shrink-0" aria-hidden />
+                  <span>Referencia del mercado actual ({product.crop} · {product.unit})</span>
+                </div>
+                <Link
+                  href="/agro-market?seccion=precios"
+                  prefetch={false}
+                  className="text-xs font-semibold text-[#2c6048] underline underline-offset-2 dark:text-[#a8d5b3]"
+                >
+                  Actualizar precios
+                </Link>
+              </div>
+              {activeMarketPrice ? (
+                <div className="mt-2 grid gap-1 text-xs sm:text-sm">
+                  <p className="text-foreground">
+                    Precio real del mercado: <strong className="text-base text-emerald-800 dark:text-emerald-300">{usd(activeMarketPrice.priceUsd)}</strong> por {product.unit}
+                    {(activeMarketPrice.minPriceUsd || activeMarketPrice.maxPriceUsd) && (
+                      <span className="ml-1.5 text-xs text-muted-foreground">
+                        (rango {activeMarketPrice.minPriceUsd ? usd(activeMarketPrice.minPriceUsd) : '—'} – {activeMarketPrice.maxPriceUsd ? usd(activeMarketPrice.maxPriceUsd) : '—'})
+                      </span>
+                    )}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {activeMarketPrice.marketName} · {activeMarketPrice.source} · actualizado {formatDate(activeMarketPrice.effectiveDate)}
+                  </p>
+                </div>
+              ) : (
+                <p className="mt-1.5 text-xs text-muted-foreground">
+                  No hay un precio de mercado registrado para <strong>{product.crop}</strong> en <strong>{product.unit}</strong>.
+                  {product.customerUnitPrice && (
+                    <> Referencia anotada en recepción: <strong className="text-foreground">{usd(product.customerUnitPrice)}</strong>.</>
+                  )}
+                </p>
+              )}
+              <p className="mt-1.5 text-xs text-muted-foreground">
+                {suggestedSalePrice
+                  ? <>Precio sugerido: <strong className="text-foreground">{usd(suggestedSalePrice)}</strong>. El sistema solo sugiere este valor; ingresa tú el precio final de venta.</>
+                  : 'El sistema no fija el precio: escribe libremente el precio final al cliente.'}
+              </p>
+            </div>
+          </div>
         )}
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <label className="grid gap-1 text-sm font-medium">
-            Cantidad
+            Cantidad ({product?.unit ?? 'unidad'})
             <input required inputMode="decimal" maxLength={13} value={quantity} onChange={(event) => setQuantity(event.target.value)} aria-invalid={exceeds} className={marketUi.input} />
           </label>
           <label className="grid gap-1 text-sm font-medium">
             Precio al cliente ($)
-            <input required inputMode="decimal" maxLength={13} value={price} onChange={(event) => setPrice(event.target.value)} className={marketUi.input} />
+            <input
+              required
+              inputMode="decimal"
+              maxLength={13}
+              placeholder={suggestedSalePrice ? `Sugerido: ${suggestedSalePrice}` : 'Ej. 5.00'}
+              value={price}
+              onChange={(event) => setPrice(event.target.value)}
+              className={marketUi.input}
+            />
           </label>
           <div className="grid gap-1 text-sm font-medium">
             <span>Ganancia sobre costo</span>
@@ -322,6 +460,11 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
             <output className="rounded-xl bg-emerald-50 px-3 py-2 font-semibold tabular-nums dark:bg-emerald-950/35">{usd(estimate)}</output>
           </div>
         </div>
+        {belowProductionCost && (
+          <p role="status" className="rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-xs font-medium text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+            Aviso: el precio ingresado ({usd(price)}) está por debajo del costo referencial de producción ({usd(product?.productionUnitPrice)}). Puedes guardarlo igual si así lo decides.
+          </p>
+        )}
         {exceeds && !canRetry && <MarketError message="La cantidad supera el saldo del producto en este recibo." />}
         {error && <MarketError message={error} />}
         <div className="flex flex-wrap gap-2">
@@ -331,6 +474,71 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
           {editing && <button type="button" disabled={busy} className={marketUi.button} onClick={stopEditing}>Cancelar edición</button>}
         </div>
       </form>
+
+      {convertOpen && product && available !== undefined && (
+        <MarketDialog
+          title={`Cambiar presentación de ${product.crop}`}
+          action="Guardar cambio de unidad"
+          busy={convertBusy}
+          onCancel={() => setConvertOpen(false)}
+          onConfirm={() => void confirmUnitConversion()}
+        >
+          <p className="text-muted-foreground">
+            Saldo actual: <strong className="text-foreground">{units(available)} {product.unit}</strong> ({receiptCode(product.receiptNumber)}). El envío original de Producción se mantiene intacto.
+          </p>
+          <label className="grid gap-1 text-sm font-medium">
+            Nueva unidad de venta
+            <select
+              value={convertUnitId}
+              onChange={(e) => setConvertUnitId(e.target.value)}
+              className={marketUi.input}
+            >
+              <option value="">Selecciona nueva unidad</option>
+              {(priceCatalog?.units ?? [])
+                .filter((u) => u.name.toLowerCase() !== product.unit.toLowerCase())
+                .map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.name}
+                  </option>
+                ))}
+              <option value="__custom__">+ Otra unidad (ej. unidades, libras, fundas)</option>
+            </select>
+          </label>
+          {convertUnitId === '__custom__' && (
+            <label className="grid gap-1 text-sm font-medium">
+              Escribe la nueva unidad
+              <input
+                maxLength={40}
+                placeholder="Ej. unidades, libras"
+                value={convertUnitName}
+                onChange={(e) => setConvertUnitName(e.target.value)}
+                className={marketUi.input}
+              />
+            </label>
+          )}
+          <label className="grid gap-1 text-sm font-medium">
+            ¿Cuántas salen en total en la nueva unidad?
+            <input
+              inputMode="decimal"
+              maxLength={13}
+              placeholder="Ej. 100"
+              value={convertQty}
+              onChange={(e) => setConvertQty(e.target.value)}
+              className={marketUi.input}
+            />
+          </label>
+          {product.productionUnitPrice && Number(convertQty) > 0 && Number(available) > 0 && (
+            <p className="rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200">
+              Costo base proporcional:{' '}
+              <strong>
+                {usd(((Number(product.productionUnitPrice) * Number(available)) / Number(convertQty)).toFixed(2))}
+              </strong>{' '}
+              por nueva unidad.
+            </p>
+          )}
+          {convertError && <MarketError message={convertError} />}
+        </MarketDialog>
+      )}
     </section>
   )
 }
