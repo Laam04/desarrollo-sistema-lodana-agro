@@ -6,11 +6,53 @@ export class ApiError extends Error {
   }
 }
 
+export function createRequestId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  const bytes = new Uint8Array(16)
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    crypto.getRandomValues(bytes)
+  } else {
+    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256)
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
+const DEFAULT_TIMEOUT_MS = 20_000
+
 export async function productionFetch<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init)
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
+  const callerSignal = init?.signal
+  const onCallerAbort = () => controller.abort()
+  if (callerSignal) {
+    if (callerSignal.aborted) controller.abort()
+    else callerSignal.addEventListener('abort', onCallerAbort, { once: true })
+  }
+
+  let response: Response
+  try {
+    response = await fetch(url, { ...init, signal: controller.signal })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new ApiError('La solicitud tardó demasiado. Verifica tu conexión e inténtalo de nuevo.', 0)
+    }
+    throw new ApiError('No se pudo conectar con el servidor. Verifica tu conexión a internet.', 0)
+  } finally {
+    clearTimeout(timer)
+    callerSignal?.removeEventListener('abort', onCallerAbort)
+  }
+
+  if (response.status === 204) return undefined as T
+
   const data = await response.json().catch(() => null)
   if (response.status === 401 && !url.startsWith('/api/profile-')) {
-    window.location.replace('/')
+    if (typeof window !== 'undefined') window.location.replace('/')
+    throw new ApiError('Tu sesión expiró. Redirigiendo al inicio…', 401)
   }
   if (!response.ok || data === null) {
     throw new ApiError(data?.error ?? 'No se pudo completar la solicitud.', response.status)

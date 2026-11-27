@@ -13,8 +13,17 @@ export function marketDay(date = new Date()) {
   return farmDay.format(date)
 }
 
+export function isValidIsoDay(day: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false
+  const year = Number(day.slice(0, 4))
+  if (year < 2000 || year > 2100) return false
+  const parsed = new Date(day + 'T00:00:00Z')
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === day
+}
+
 export function marketWeek(day: string) {
-  const start = new Date(day + 'T00:00:00Z')
+  const safeDay = isValidIsoDay(day) ? day : marketDay()
+  const start = new Date(safeDay + 'T00:00:00Z')
   start.setUTCDate(start.getUTCDate() - (start.getUTCDay() + 6) % 7)
   const end = new Date(start)
   end.setUTCDate(end.getUTCDate() + 6)
@@ -24,7 +33,13 @@ export function marketWeek(day: string) {
 export function markupPercent(price: string, base: string | null) {
   const sale = cents(price)
   const cost = base === null ? null : cents(base)
-  return sale !== null && sale > 0 && cost !== null && cost > 0 ? (sale - cost) / cost * 100 : null
+  if (sale === null || sale <= 0 || cost === null || cost <= 0) return null
+  // Cálculo exacto a centésimas de porcentaje con redondeo half-up
+  const diff = BigInt(sale - cost)
+  const denom = BigInt(cost)
+  const sign = diff < BigInt(0) ? BigInt(-1) : BigInt(1)
+  const scaled = ((diff < BigInt(0) ? -diff : diff) * BigInt(10000) + denom / BigInt(2)) / denom
+  return Number(sign * scaled) / 100
 }
 
 export function formatMarkup(value: number | null) {
@@ -37,10 +52,10 @@ export function receiptCode(number: number) {
 
 export type ShipmentProduct = {
   id: string
-  crop: { name: string }
+  crop: { id?: string; name: string }
   variety: { name: string } | null
   productionArea: { name: string } | null
-  unit: { name: string }
+  unit: { id?: string; name: string }
   quantity: string
   receivedQuantity: string
   pendingQuantity: string
@@ -54,6 +69,9 @@ export type MarketShipment = {
   date: string
   status: string
   notes: string | null
+  hasNoteImage?: boolean
+  noteImageName?: string | null
+  noteImageUrl?: string | null
   items: ShipmentProduct[]
 }
 
@@ -62,7 +80,18 @@ export type MarketReceipt = {
   receiptNumber: number
   receivedAt: string
   notes: string | null
-  items: { id: string; shipmentItemId: string; receivedQuantity: string; customerUnitPrice: string | null; notes: string | null }[]
+  items: {
+    id: string
+    shipmentItemId: string
+    receivedQuantity: string
+    customerUnitPrice: string | null
+    notes: string | null
+    saleQuantity?: string | null
+    saleUnitCost?: string | null
+    parentItemId?: string | null
+    convertedFromQty?: string | null
+    saleUnit?: { id: string; name: string } | null
+  }[]
 }
 
 export type MarketShipmentDetail = MarketShipment & { receptions: MarketReceipt[] }
@@ -72,10 +101,14 @@ export type StockRow = {
   receiptNumber: number
   receivedAt: string
   shipmentCode: string
+  cropId?: string
   crop: string
   variety: string | null
   area: string | null
+  unitId?: string
   unit: string
+  originalUnit?: string
+  isConverted?: boolean
   productionUnitPrice: string | null
   customerUnitPrice: string | null
   available: string
@@ -102,6 +135,14 @@ export type MarketSalesSummary = {
   profit: string | null
   count: number
   missingCost: number
+  comparison: {
+    through: string | null
+    previousFrom: string
+    previousTo: string
+    salesChange: number | null
+    sales: { current: string; previous: string }
+    receipts: { unitId: string; unit: string; current: string; previous: string }[]
+  }
   days: { date: string; total: string; count: number }[]
 }
 
@@ -123,7 +164,8 @@ export function decimalInput(value: string) {
 export function cents(value: string) {
   const normalized = decimalInput(value)
   if (!/^\d{1,10}(?:\.\d{1,2})?$/.test(normalized)) return null
-  return Math.round(Number(normalized) * 100)
+  const [whole, frac = ''] = normalized.split('.')
+  return Number(whole) * 100 + Number(frac.padEnd(2, '0'))
 }
 
 export function salesValue(quantity: string, price: string) {
@@ -132,4 +174,41 @@ export function salesValue(quantity: string, price: string) {
   if (count === null || unitPrice === null) return null
   const subtotal = (BigInt(count) * BigInt(unitPrice) + BigInt(50)) / BigInt(100)
   return subtotal < BigInt('100000000000000') ? Number(subtotal) / 100 : null
+}
+
+export type PriceSuggestion = {
+  price: string
+  reason: string
+}
+
+function positiveAmount(value: string | number | null | undefined): number | null {
+  if (value === null || value === undefined || value === '') return null
+  const parsed = Number(typeof value === 'string' ? decimalInput(value) : value)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+}
+
+function roundMoney(value: number): string {
+  return (Math.round(value * 100) / 100).toFixed(2)
+}
+
+/** Sugiere el precio anotado en recepción con un mínimo de costo de producción + 15%. */
+export function suggestRetailSalePrice(
+  productionUnitPrice?: string | number | null,
+  receptionPrice?: string | number | null,
+): PriceSuggestion | null {
+  const prod = positiveAmount(productionUnitPrice)
+  const costFloor = prod !== null ? Math.round(prod * 1.15 * 100) / 100 : null
+  const reception = positiveAmount(receptionPrice)
+  if (reception !== null) {
+    if (costFloor !== null && costFloor > reception) {
+      return { price: roundMoney(costFloor), reason: 'costo de producción + 15%' }
+    }
+    return { price: roundMoney(reception), reason: 'referencia anotada en recepción' }
+  }
+
+  if (costFloor !== null) {
+    return { price: roundMoney(costFloor), reason: 'costo de producción + 15%' }
+  }
+
+  return null
 }

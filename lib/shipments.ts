@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client'
 import { ProductionError, isRecord } from '@/lib/production-api'
 import { cleanName, parseDate, parsePositiveDecimal } from '@/lib/production-validation'
 import { committedStock, endOfDay, shipmentStock } from '@/lib/production-stock'
+import { cleanReceiptImageName, defaultReceiptFileName, parseReceiptImageDataUrl } from '@/lib/receipt-image'
 import { editableShipmentStatuses } from '@/lib/shipment-status'
 
 export const shipmentInclude = {
@@ -17,6 +18,32 @@ export const shipmentInclude = {
   receptions: { where: { deletedAt: null }, include: { items: { where: { deletedAt: null } } } },
 } satisfies Prisma.ShipmentInclude
 
+export const shipmentSelect = {
+  id: true,
+  requestId: true,
+  code: true,
+  date: true,
+  status: true,
+  notes: true,
+  noteImageName: true,
+  createdBy: true,
+  createdAt: true,
+  updatedAt: true,
+  deletedAt: true,
+  ...shipmentInclude,
+} satisfies Prisma.ShipmentSelect
+
+export function serializeShipment<T extends { id: string; noteImageName: string | null; updatedAt: Date }>(row: T) {
+  const hasNoteImage = Boolean(row.noteImageName)
+  return {
+    ...row,
+    hasNoteImage,
+    noteImageUrl: hasNoteImage ? `/api/shipments/${row.id}/photo?v=${row.updatedAt.getTime()}` : null,
+  }
+}
+
+const uuidRegex = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i
+
 export function shipmentDraft(body: Record<string, unknown>, allowLegacy: boolean) {
   const date = parseDate(body.date)
   const rows = body.items === undefined && allowLegacy
@@ -27,6 +54,15 @@ export function shipmentDraft(body: Record<string, unknown>, allowLegacy: boolea
     throw new ProductionError('Indica una fecha válida y entre 1 y 100 productos para el envío.')
   }
 
+  let requestId: string | undefined
+  if (body.requestId !== undefined && body.requestId !== null && body.requestId !== '') {
+    if (typeof body.requestId !== 'string' || !uuidRegex.test(body.requestId)) {
+      throw new ProductionError('La clave de solicitud del envío debe ser un UUID válido.')
+    }
+    requestId = body.requestId.toLowerCase()
+  }
+
+  const seenProducts = new Set<string>()
   const items = rows.map((row: unknown) => {
     if (!isRecord(row)) throw new ProductionError('Cada producto debe ser un objeto válido.')
     const { cropId, varietyId, productionAreaId, unitId } = row
@@ -36,15 +72,23 @@ export function shipmentDraft(body: Record<string, unknown>, allowLegacy: boolea
       [varietyId, productionAreaId, unitId].some((id) => id != null && typeof id !== 'string')) {
       throw new ProductionError('Cada producto debe tener un cultivo, cantidad y precio unitario válidos (hasta dos decimales).')
     }
+    const normalizedItem = {
+      cropId,
+      varietyId: typeof varietyId === 'string' && varietyId ? varietyId : null,
+      productionAreaId: typeof productionAreaId === 'string' && productionAreaId ? productionAreaId : null,
+      unitId: typeof unitId === 'string' && unitId ? unitId : null,
+    }
+    const dedupKey = JSON.stringify([normalizedItem.cropId, normalizedItem.varietyId, normalizedItem.productionAreaId, normalizedItem.unitId])
+    if (seenProducts.has(dedupKey)) {
+      throw new ProductionError('No repitas el mismo producto en varias líneas del mismo envío.')
+    }
+    seenProducts.add(dedupKey)
     const estimatedTotalAmount = new Prisma.Decimal(quantity).mul(unitPrice).toDecimalPlaces(2)
     if (estimatedTotalAmount.gte('1000000000000')) {
       throw new ProductionError('El importe estimado de un producto supera el máximo permitido.')
     }
     return {
-      cropId,
-      varietyId: typeof varietyId === 'string' && varietyId ? varietyId : null,
-      productionAreaId: typeof productionAreaId === 'string' && productionAreaId ? productionAreaId : null,
-      unitId: typeof unitId === 'string' && unitId ? unitId : null,
+      ...normalizedItem,
       quantity,
       unitPrice,
       estimatedTotalAmount,
@@ -52,11 +96,34 @@ export function shipmentDraft(body: Record<string, unknown>, allowLegacy: boolea
     }
   })
 
-  return { date, items, notes: cleanName(body.notes).slice(0, 2000) || null }
+  let noteImagePatch: { noteImage: string | null; noteImageName: string | null } | undefined
+  if (body.noteImage !== undefined) {
+    if (body.noteImage === null || body.noteImage === '') {
+      noteImagePatch = { noteImage: null, noteImageName: null }
+    } else {
+      const parsedImage = parseReceiptImageDataUrl(body.noteImage)
+      if (!parsedImage) {
+        throw new ProductionError('La foto adjunta debe ser una imagen JPG, PNG o WebP válida (máximo 1 MB).', 400)
+      }
+      noteImagePatch = {
+        noteImage: parsedImage.dataUrl,
+        noteImageName:
+          cleanReceiptImageName(body.noteImageName) ?? defaultReceiptFileName(parsedImage.mime),
+      }
+    }
+  }
+
+  return {
+    date,
+    items,
+    notes: cleanName(body.notes).slice(0, 2000) || null,
+    noteImagePatch,
+    requestId,
+  }
 }
 
 export async function findShipment(tx: Prisma.TransactionClient, id: string) {
-  const shipment = await tx.shipment.findFirst({ where: { id, deletedAt: null }, include: shipmentInclude })
+  const shipment = await tx.shipment.findFirst({ where: { id, deletedAt: null }, select: shipmentSelect })
   if (!shipment) throw new ProductionError('El envío no existe o está en la papelera.', 404)
   return shipment
 }
@@ -67,20 +134,62 @@ export function assertShipmentEditable(shipment: Awaited<ReturnType<typeof findS
   }
 }
 
+export function matchesShipmentDraft(
+  existing: Awaited<ReturnType<typeof findShipment>>,
+  draft: ReturnType<typeof shipmentDraft>,
+  actor: string | null,
+) {
+  if (existing.deletedAt || existing.createdBy !== actor) return false
+  if (existing.date.toISOString().slice(0, 10) !== draft.date.toISOString().slice(0, 10)) return false
+  if ((existing.notes ?? null) !== (draft.notes ?? null)) return false
+  if (existing.items.length !== draft.items.length) return false
+  return draft.items.every((item) =>
+    existing.items.some(
+      (saved) =>
+        saved.cropId === item.cropId &&
+        saved.varietyId === item.varietyId &&
+        saved.productionAreaId === item.productionAreaId &&
+        (item.unitId === null || saved.unitId === item.unitId) &&
+        saved.quantity.eq(item.quantity) &&
+        saved.estimatedUnitPrice?.eq(item.unitPrice) &&
+        (item.notes === undefined || saved.notes === item.notes),
+    ),
+  )
+}
+
 export async function saveShipment(
   tx: Prisma.TransactionClient,
   draft: ReturnType<typeof shipmentDraft>,
   actor: string | null,
   id?: string,
 ) {
+  if (!id && draft.requestId) {
+    const existing = await tx.shipment.findUnique({ where: { requestId: draft.requestId }, select: shipmentSelect })
+    if (existing) {
+      if (!matchesShipmentDraft(existing, draft, actor)) {
+        throw new ProductionError('La clave de solicitud ya corresponde a otro envío.', 409)
+      }
+      return { shipment: serializeShipment(existing), created: false }
+    }
+  }
+
   const before = id ? await findShipment(tx, id) : undefined
   if (before) assertShipmentEditable(before)
 
-  const datesAndNotes = { date: draft.date, notes: draft.notes }
+  const datesAndNotes = {
+    date: draft.date,
+    notes: draft.notes,
+    ...(draft.noteImagePatch ?? {}),
+  }
   const shipment = before
     ? await tx.shipment.update({ where: { id: before.id }, data: datesAndNotes })
     : await tx.shipment.create({
-        data: { ...datesAndNotes, code: `ENV-${randomUUID().replaceAll('-', '').slice(0, 12).toUpperCase()}`, createdBy: actor },
+        data: {
+          ...datesAndNotes,
+          requestId: draft.requestId ?? null,
+          code: `ENV-${randomUUID().replaceAll('-', '').slice(0, 12).toUpperCase()}`,
+          createdBy: actor,
+        },
       })
 
   if (before?.items.length) {
@@ -109,6 +218,7 @@ export async function saveShipment(
     byProduct.set(key, matching)
   }
   const oldItems = new Map(before?.items.map((item) => [productKey(item), item]))
+  const resolvedKeys = new Set<string>()
 
   for (const item of draft.items) {
     const crop = cropById.get(item.cropId)
@@ -116,6 +226,10 @@ export async function saveShipment(
     const unitId = item.unitId || crop.unitId
     if (!unitId) throw new ProductionError(`Selecciona una unidad para ${crop.name}.`)
     const key = productKey({ ...item, unitId })
+    if (resolvedKeys.has(key)) {
+      throw new ProductionError('No repitas el mismo producto en varias líneas del mismo envío.')
+    }
+    resolvedKeys.add(key)
     const candidates = byProduct.get(key) ?? []
     let remaining = new Prisma.Decimal(item.quantity)
     const allocations: { harvestId: string; quantity: Prisma.Decimal }[] = []
@@ -159,7 +273,7 @@ export async function saveShipment(
       afterJson: JSON.parse(JSON.stringify(result)),
     },
   })
-  return result
+  return { shipment: serializeShipment(result), created: !before }
 }
 
 export function productKey(item: { cropId: string; varietyId: string | null; productionAreaId: string | null; unitId: string }) {

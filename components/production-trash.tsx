@@ -50,7 +50,7 @@ export function ProductionTrash() {
       })
       setNotice({ text: `Registros recuperados: ${result.restoredCount}.`, error: false })
       void mutate((current) => current?.filter((group) => group.groupId !== groupId))
-      void invalidateProduction('/api/crops', '/api/units', '/api/harvests', '/api/losses', '/api/costs', '/api/production-summary', '/api/shipments/availability')
+      void invalidateProduction('/api/crops', '/api/units', '/api/zones', '/api/cost-categories', '/api/harvests', '/api/losses', '/api/costs', '/api/shipments', '/api/production-summary', '/api/shipments/availability')
     } catch (failure) {
       setNotice({ text: failure instanceof Error ? failure.message : 'No se pudo restaurar el registro.', error: true })
     } finally {

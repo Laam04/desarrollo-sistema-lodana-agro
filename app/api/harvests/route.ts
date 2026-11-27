@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client'
 import { NextResponse } from 'next/server'
-import { prisma } from '@/lib/prisma'
-import { currentActor, ProductionError, productionError, readBody } from '@/lib/production-api'
+import { prisma, runSerializable } from '@/lib/prisma'
+import { ProductionError, productionError, readBody, requireProfile } from '@/lib/production-api'
 import { historyQuery } from '@/lib/production-history'
 import { activeHarvest, activeLoss, committedStock, stockAllocation } from '@/lib/production-stock'
 import { cleanName, parseDate, parsePositiveDecimal } from '@/lib/production-validation'
@@ -20,6 +20,7 @@ type Harvest = Prisma.HarvestGetPayload<{ include: typeof harvestInclude }>
 
 export async function GET(request: Request) {
   try {
+    await requireProfile(['production', 'admin'])
     const { cropId, date, search, take, skip, result } = historyQuery(request, 200)
     const rows = await prisma.harvest.findMany({
       where: {
@@ -46,9 +47,9 @@ async function assertReferences(tx: Prisma.TransactionClient, ids: {
     before.productionAreaId === ids.productionAreaId && before.unitId === ids.unitId) return
 
   if (before && (before.losses.length ||
-      await tx.shipmentAllocation.count({ where: { harvestId: before.id } }) ||
-      await tx.loss.count({ where: { harvestId: before.id } }))) {
-    throw new ProductionError('El cultivo, la variedad, el área y la unidad quedan fijados cuando la cosecha tiene mermas o forma parte de un envío.', 409)
+      await tx.shipmentAllocation.count({ where: { ...stockAllocation, harvestId: before.id } }) ||
+      await tx.loss.count({ where: { ...activeLoss, harvestId: before.id } }))) {
+    throw new ProductionError('El cultivo, la variedad, el área y la unidad quedan fijados cuando la cosecha tiene mermas activas o forma parte de un envío vigente.', 409)
   }
 
   const { cropId, varietyId, productionAreaId, unitId } = ids
@@ -66,6 +67,7 @@ async function assertReferences(tx: Prisma.TransactionClient, ids: {
 
 async function save(request: Request, update: boolean) {
   try {
+    const actor = await requireProfile(['production', 'admin'])
     const body = await readBody(request)
     const date = parseDate(body.date)
     const quantity = parsePositiveDecimal(body.quantity)
@@ -88,8 +90,7 @@ async function save(request: Request, update: boolean) {
       affectsHarvest: body.lossAffectsHarvest, notes: body.lossNotes,
     }) : null
 
-    const actor = await currentActor()
-    const row = await prisma.$transaction(async (tx) => {
+    const row = await runSerializable(async (tx) => {
       const before = update ? await tx.harvest.findFirst({ where: { id, ...activeHarvest }, include: harvestInclude }) : null
       if (update && !before) throw new ProductionError('La cosecha no existe o está en la papelera.', 404)
       const crop = typeof body.unitId === 'string' && body.unitId
@@ -133,8 +134,16 @@ async function save(request: Request, update: boolean) {
         ? await tx.harvest.update({ where: { id }, data })
         : await tx.harvest.create({ data: { ...data, createdBy: actor } })
       if (loss) await saveLoss(tx, harvest.id, loss, actor)
-      return tx.harvest.findUniqueOrThrow({ where: { id: harvest.id }, include: harvestInclude })
-    }, { isolationLevel: 'Serializable' })
+      const saved = await tx.harvest.findUniqueOrThrow({ where: { id: harvest.id }, include: harvestInclude })
+      await tx.auditLog.create({
+        data: {
+          entity: 'Harvest', entityId: saved.id, action: before ? 'UPDATE' : 'CREATE', actor,
+          beforeJson: before ? { date: before.date, quantity: before.quantity.toString(), cropId: before.cropId } : undefined,
+          afterJson: { date: saved.date, quantity: saved.quantity.toString(), cropId: saved.cropId },
+        },
+      })
+      return saved
+    })
     return NextResponse.json(row, { status: update ? 200 : 201 })
   } catch (error) {
     return productionError(error, 'No se pudo guardar la cosecha.')
@@ -151,10 +160,10 @@ export function PATCH(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
+    const actor = await requireProfile(['production', 'admin'])
     const { id } = await readBody(request)
     if (typeof id !== 'string' || !id) throw new ProductionError('Indica la cosecha que quieres eliminar.')
-    const actor = await currentActor()
-    const result = await prisma.$transaction(async (tx) => {
+    const result = await runSerializable(async (tx) => {
       const harvest = await tx.harvest.findFirst({ where: { id, ...activeHarvest }, include: harvestInclude })
       if (!harvest) throw new ProductionError('La cosecha no existe o está en la papelera.', 404)
       if (await tx.shipmentAllocation.count({ where: { ...stockAllocation, harvestId: id } })) {
@@ -162,8 +171,11 @@ export async function DELETE(request: Request) {
       }
       const entry = await moveToTrash(tx, 'harvest', id, undefined, actor)
       for (const loss of harvest.losses) await moveToTrash(tx, 'loss', loss.id, entry.groupId, actor)
+      await tx.auditLog.create({
+        data: { entity: 'Harvest', entityId: id, action: 'TRASH', actor, beforeJson: { quantity: harvest.quantity.toString() } },
+      })
       return entry
-    }, { isolationLevel: 'Serializable' })
+    })
     return NextResponse.json(result)
   } catch (error) {
     return productionError(error, 'No se pudo mover la cosecha a la papelera.')

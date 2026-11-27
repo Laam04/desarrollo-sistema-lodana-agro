@@ -512,7 +512,7 @@ export function CropsManager() {
       setEditingUnit(null)
       setNewUnit('')
       notify('success', `Unidad «${clean}» guardada.`)
-      void invalidateProduction('/api/units', '/api/crops', '/api/production-summary', '/api/shipments/availability')
+      void invalidateProduction('/api/units', '/api/crops', '/api/harvests', '/api/losses', '/api/shipments', '/api/production-summary', '/api/shipments/availability')
     } catch (error) {
       notify('error', error instanceof Error ? error.message : 'No se pudo guardar la unidad.')
     }
@@ -530,11 +530,11 @@ export function CropsManager() {
           await productionFetch('/api/units', {
             method: unit.active ? 'DELETE' : 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: unit.id, name: unit.name, active: true }),
+            body: JSON.stringify(unit.active ? { id: unit.id } : { id: unit.id, name: unit.name, active: true }),
           })
           if (unit.active && unitId === unit.id) setUnitId('')
           notify('success', unit.active ? 'Unidad desactivada.' : 'Unidad reactivada.')
-          void invalidateProduction('/api/units', '/api/shipments/availability')
+          void invalidateProduction('/api/units', '/api/crops', '/api/shipments/availability')
         } catch (error) {
           notify('error', error instanceof Error ? error.message : 'No se pudo actualizar la unidad.')
         }
@@ -594,12 +594,30 @@ export function CropsManager() {
 
     setError('')
 
+    const existingActiveCrop =
+      !editingCrop &&
+      crops.find(
+        (crop) =>
+          crop.active &&
+          normalizeCatalogName(crop.name) === normalizeCatalogName(name),
+      )
+
     askConfirm({
-      title: editingCrop ? 'Guardar cambios' : 'Guardar nuevo cultivo',
+      title: editingCrop
+        ? 'Guardar cambios'
+        : existingActiveCrop
+          ? 'Agregar zonas al cultivo existente'
+          : 'Guardar nuevo cultivo',
       description: editingCrop
         ? `Se actualizará la configuración de "${editingCrop.name}". Los registros anteriores no se modificarán.`
-        : `Se creará el cultivo "${name.trim()}" y quedará disponible para registrar cosechas.`,
-      confirmLabel: editingCrop ? 'Guardar cambios' : 'Guardar cultivo',
+        : existingActiveCrop
+          ? `El cultivo "${existingActiveCrop.name}" ya está registrado. Se vincularán las zonas seleccionadas sin duplicarlo.`
+          : `Se creará el cultivo "${name.trim()}" y quedará disponible para registrar cosechas.`,
+      confirmLabel: editingCrop
+        ? 'Guardar cambios'
+        : existingActiveCrop
+          ? 'Agregar zonas'
+          : 'Guardar cultivo',
       tone: 'default',
       action: saveCrop,
     })
@@ -633,7 +651,7 @@ export function CropsManager() {
           : 'Cultivo guardado correctamente.',
       )
 
-      void invalidateProduction('/api/crops', '/api/shipments/availability', '/api/production-summary')
+      void invalidateProduction('/api/crops', '/api/harvests', '/api/losses', '/api/shipments', '/api/costs', '/api/shipments/availability', '/api/production-summary')
     } catch (error) {
       notify('error', error instanceof Error ? error.message : 'No se pudo guardar el cultivo.')
     } finally {
@@ -710,7 +728,7 @@ export function CropsManager() {
           })
           if (editingCrop?.id === crop.id) resetForm()
           notify('success', 'Cultivo movido a la papelera.')
-          void invalidateProduction('/api/crops', '/api/trash', '/api/shipments/availability')
+          void invalidateProduction('/api/crops', '/api/trash', '/api/shipments/availability', '/api/production-summary')
         } catch (error) {
           notify('error', error instanceof Error ? error.message : 'No se pudo eliminar el cultivo.')
         } finally {

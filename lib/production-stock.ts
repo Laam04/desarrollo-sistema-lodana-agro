@@ -15,28 +15,34 @@ export const shipmentStock = {
   unit: { active: true, deletedAt: null },
 } satisfies Prisma.HarvestWhereInput
 
+const CHUNK_SIZE = 5000
+
 export async function committedStock(db: StockReader, harvestIds: string[], excludeShipmentId?: string, excludeLossId?: string) {
-  if (!harvestIds.length) return new Map<string, Prisma.Decimal>()
-  const harvestId = { in: harvestIds }
-  const [allocations, losses] = await Promise.all([
-    db.shipmentAllocation.groupBy({
-      by: ['harvestId'],
-      where: {
-        ...stockAllocation,
-        harvestId,
-        shipmentItem: { ...stockAllocation.shipmentItem, shipmentId: excludeShipmentId ? { not: excludeShipmentId } : undefined },
-      },
-      _sum: { quantity: true },
-    }),
-    db.loss.groupBy({
-      by: ['harvestId'],
-      where: { ...activeLoss, harvestId, affectsHarvest: true, id: excludeLossId ? { not: excludeLossId } : undefined },
-      _sum: { quantity: true },
-    }),
-  ])
   const totals = new Map<string, Prisma.Decimal>()
-  for (const row of [...allocations, ...losses]) {
-    totals.set(row.harvestId, (totals.get(row.harvestId) ?? new Prisma.Decimal(0)).plus(row._sum.quantity ?? 0))
+  if (!harvestIds.length) return totals
+
+  for (let offset = 0; offset < harvestIds.length; offset += CHUNK_SIZE) {
+    const chunk = harvestIds.slice(offset, offset + CHUNK_SIZE)
+    const harvestId = { in: chunk }
+    const [allocations, losses] = await Promise.all([
+      db.shipmentAllocation.groupBy({
+        by: ['harvestId'],
+        where: {
+          ...stockAllocation,
+          harvestId,
+          shipmentItem: { ...stockAllocation.shipmentItem, shipmentId: excludeShipmentId ? { not: excludeShipmentId } : undefined },
+        },
+        _sum: { quantity: true },
+      }),
+      db.loss.groupBy({
+        by: ['harvestId'],
+        where: { ...activeLoss, harvestId, affectsHarvest: true, id: excludeLossId ? { not: excludeLossId } : undefined },
+        _sum: { quantity: true },
+      }),
+    ])
+    for (const row of [...allocations, ...losses]) {
+      totals.set(row.harvestId, (totals.get(row.harvestId) ?? new Prisma.Decimal(0)).plus(row._sum.quantity ?? 0))
+    }
   }
   return totals
 }

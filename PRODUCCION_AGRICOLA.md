@@ -2,9 +2,11 @@
 
 ## Activación
 
-1. Genera el cliente con `npx prisma generate` y aplica las migraciones con `npx prisma migrate deploy` en la base correspondiente.
-2. Configura `DATABASE_URL`, `LODANA_SESSION_SECRET` y `LODANA_PIN_PRODUCTION` en el entorno de despliegue. La sesión requiere un secreto aleatorio de al menos 32 caracteres y los perfiles requieren un PIN de cuatro dígitos. Configura `LODANA_PIN_RECEPTION`, `LODANA_PIN_QUERIES` y `LODANA_PIN_ADMIN` para habilitar sus accesos.
-3. Ejecuta `npm run build`. El acceso desplegado usa HTTPS y una cookie de sesión de ocho horas. Diez PIN incorrectos bloquean temporalmente el perfil durante su ventana de 15 minutos.
+1. Copia `.env.example` a `.env` y configura `DATABASE_URL` y `DIRECT_URL`:
+   - **Pruebas locales (base de datos estática):** inicia PostgreSQL 16 local con `pnpm run db:test:start`, aplica migraciones con `pnpm run db:migrate` y carga el conjunto estático de pruebas con `pnpm run db:seed` (o `pnpm run db:seed:reset` para reiniciarlo).
+   - **Neon (PostgreSQL serverless):** asigna la cadena *pooled* (`-pooler...neon.tech?sslmode=require`) en `DATABASE_URL` y la cadena *direct* (sin `-pooler`) en `DIRECT_URL`, luego ejecuta `pnpm exec prisma generate` y `pnpm run db:migrate`.
+2. Configura `LODANA_SESSION_SECRET` (secreto aleatorio de al menos 32 caracteres), `APP_ORIGIN` (origen canónico HTTPS para validación CSRF) y las credenciales `LODANA_PIN_PRODUCTION`, `LODANA_PIN_RECEPTION`, `LODANA_PIN_QUERIES` y `LODANA_PIN_ADMIN` (exactamente 4 caracteres).
+3. Ejecuta `pnpm run build`. El acceso desplegado usa HTTPS, cookie `__Host-lodana-profile` de ocho horas revocable en base de datos y límite de diez intentos fallidos por perfil e IP durante una ventana de 15 minutos.
 
 La auditoría de envíos y recepciones identifica el perfil con el que se realizó la operación. Los historiales conservan las referencias a unidades, cultivos, variedades y áreas. Al desactivar un cultivo, sus cosechas siguen en el historial y sus existencias salen del catálogo de despacho hasta que se reactive. La papelera permite restaurar registros durante 60 días.
 
@@ -51,3 +53,9 @@ El precio al cliente que anotes en el recibo se sugiere al vender el producto. E
 - La producción útil descuenta las mermas aplicables de cada cosecha de origen. El gráfico de mermas usa la fecha de registro de la pérdida. Los despachos, las recepciones y las ventas se agrupan por su propia fecha. Las recepciones usan la hora de Ecuador.
 - La estacionalidad exige al menos dos años calendario completos y consistencia entre años. Para la previsión se requieren 24 meses cerrados consecutivos con registros por cultivo y unidad. El modelo pondera los mismos meses de los dos años anteriores y ajusta por la mediana de sus doce variaciones interanuales. Los rangos usan errores retrospectivos del mismo horizonte cuando hay al menos seis observaciones para estimarlos. El registro mensual permite evaluar continuidad y deja abierta la cobertura real de cada mes.
 - **Consultas** se abre desde inicio sin PIN. `/api/public-analytics` publica meses cerrados y excluye celdas con menos de tres registros por indicador, cultivo y unidad. También reserva la producción útil cuando su diferencia con la cosechada revelaría una merma poco frecuente. Las comparaciones y previsiones públicas usan los valores publicados. Los motivos de pérdida detallados se consultan desde el Resumen interno.
+
+## Panel administrativo y Centro de reportes automáticos
+
+- **Administración (`/administracion`)** requiere perfil `admin`. Ofrece dashboard de supervisión, monitoreo de despachos pendientes/parciales/con diferencias, verificación automática de integridad de datos, gestión de perfiles y PINs (con hash `scrypt` persistente y revocación de sesiones), visor de auditoría de solo lectura y configuración institucional/de reportes.
+- **Reportes (`/reportes`)** requiere perfil `queries` o `admin`. Permite generar vistas previas y reportes guardados (Producción agrícola, Costos de producción, Despachos y recepciones, Comercial de Agro Market, Consolidado de productividad y análisis de impacto, y Semanal operativo), consultar el historial diferenciando reportes automáticos y manuales, y descargar en **PDF institucional** o **CSV**.
+- **Automatización**: usa `America/Guayaquil`, genera reportes semanales (lunes a domingo) y mensuales (meses calendario cerrados) evitando duplicados mediante `dedupeKey` y recuperando períodos pendientes tras apagados del servidor. Configurable mediante `CRON_SECRET`, `GET/POST /api/cron/reports`, `vercel.json` o `npm run reports:auto`. Consulta `README.md` para detalles completos.

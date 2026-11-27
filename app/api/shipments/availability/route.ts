@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client'
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
-import { ProductionError, productionError } from '@/lib/production-api'
+import { ProductionError, productionError, requireProfile } from '@/lib/production-api'
 import { committedStock, endOfDay, shipmentStock } from '@/lib/production-stock'
 import { parseDate } from '@/lib/production-validation'
 import { productKey } from '@/lib/shipments'
@@ -23,6 +23,7 @@ type Availability = {
 
 export async function GET(request: Request) {
   try {
+    await requireProfile(['production', 'admin'])
     const params = new URL(request.url).searchParams
     const dateParam = params.get('asOf') ?? params.get('date')
     const date = parseDate(dateParam)

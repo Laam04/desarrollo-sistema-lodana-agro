@@ -6,6 +6,7 @@ import useSWR from 'swr'
 import { productionFetch } from '@/lib/production-client'
 import { forecastMinimum, monthDistance, monthsBetween, shiftMonth, type AnalyticsReport, type AnalyticsSeries, type Metric, type MonthRange } from '@/lib/analytics-model'
 import { AnalyticsChart, analyticsNumber, formatMonth } from '@/components/analytics-chart'
+import { AnalysisNote } from '@/components/analysis-note'
 
 const panel = 'min-w-0 rounded-2xl border border-[#dbe7dd] bg-white p-4 shadow-sm dark:border-[#2d3b32] dark:bg-[#18211c] sm:p-5'
 const field = 'min-w-0 w-full rounded-xl border border-border bg-background px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-emerald-600'
@@ -23,6 +24,10 @@ const metricCards: { key: Metric; title: string; icon: LucideIcon }[] = [
 
 function showQuantity(value: number | null, unit = '') {
   return value === null ? '—' : analyticsNumber.format(value) + (unit ? ' ' + unit : '')
+}
+
+function formatMonthRange({ from, to }: MonthRange) {
+  return from === to ? formatMonth(from) : `${formatMonth(from)} a ${formatMonth(to)}`
 }
 
 function inPeriod(month: string, range: MonthRange) {
@@ -48,10 +53,10 @@ function availableMonths(series: AnalyticsSeries[], metric: Metric, range: Month
   ))).size
 }
 
-function comparison(series: AnalyticsSeries[], metric: Metric, report: AnalyticsReport, current: number | null) {
+function comparablePrevious(series: AnalyticsSeries[], metric: Metric, report: AnalyticsReport, current: number | null) {
   if (current === null || report.period.to === report.currentMonth) return null
   const before = total(series, metric, report.previous)
-  if (before === null || before <= 0) return null
+  if (before === null) return null
   const offset = monthDistance(report.previous.from, report.period.from)
   for (const item of series) {
     const points = item.monthly.filter((point) => point[metric] !== undefined)
@@ -63,7 +68,12 @@ function comparison(series: AnalyticsSeries[], metric: Metric, report: Analytics
     })
     if (!compatible) return null
   }
-  return (current - before) / before
+  return before
+}
+
+function comparison(series: AnalyticsSeries[], metric: Metric, report: AnalyticsReport, current: number | null) {
+  const before = comparablePrevious(series, metric, report, current)
+  return current !== null && before !== null && before > 0 ? (current - before) / before : null
 }
 
 function InfoPanel({ title, icon: Icon, note, children }: {
@@ -200,7 +210,13 @@ function ForecastPanel({ item, report }: { item: AnalyticsSeries; report: Analyt
             </label>
             <AnalyticsChart label="Previsión de cosecha" unit={item.unit} months={months} lines={[
               { label: 'Cosecha registrada', color: 'green', values: months.map((month) => history.get(month) ?? null) },
-              { label: 'Estimación', color: 'purple', dashed: true, values: months.map((month) => month === lastClosed ? history.get(month) ?? null : predictions.get(month)?.value ?? null) },
+              {
+                label: 'Estimación',
+                color: 'purple',
+                dashed: true,
+                bridgeFrom: history.has(lastClosed) ? { index: months.indexOf(lastClosed), value: history.get(lastClosed)! } : undefined,
+                values: months.map((month) => predictions.get(month)?.value ?? null),
+              },
             ]} band={hasInterval ? {
               low: months.map((month) => predictions.get(month)?.low ?? null),
               high: months.map((month) => predictions.get(month)?.high ?? null),
@@ -245,15 +261,32 @@ export function AnalyticsDashboard({ publicView = false }: { publicView?: boolea
   const series = filtered.find((item) => item.crop === chartCrop)
     ?? filtered.find((item) => item.crop === currentRanking[0]?.label)
     ?? filtered[0]
+  const closedReport = data && data.period.to === data.currentMonth
+    ? { ...data, period: { ...data.period, to: shiftMonth(data.period.to, -1) }, previous: { ...data.previous, from: shiftMonth(data.previous.from, 1) } }
+    : data
+  const highlights = !publicView && closedReport && closedReport.period.from <= closedReport.period.to
+    ? ([['harvested', 'producción cosechada'], ['useful', 'producción útil'], ['losses', 'merma registrada'], ['sold', 'cantidad vendida']] as const).map(([metric, subject]) => {
+        const current = total(filtered, metric, closedReport.period)
+        return { metric, subject, current, previous: comparablePrevious(filtered, metric, closedReport, current) }
+      })
+    : []
 
   function apply(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!period.from || !period.to || period.from > period.to || monthDistance(period.from, period.to) >= 60) {
-      setFilterError('Selecciona un período válido de hasta 60 meses.')
+    const validMonth = (value: string) => /^20\d{2}-(0[1-9]|1[0-2])$/.test(value)
+    if (
+      !validMonth(period.from) ||
+      !validMonth(period.to) ||
+      period.from > period.to ||
+      (data && period.to > data.latestMonth) ||
+      monthDistance(period.from, period.to) >= 60
+    ) {
+      setFilterError('Selecciona un período válido (AAAA-MM) de hasta 60 meses dentro del rango disponible.')
       return
     }
     setFilterError('')
     setSelected(period)
+    setDraft(null)
   }
 
   return (
@@ -293,9 +326,33 @@ export function AnalyticsDashboard({ publicView = false }: { publicView?: boolea
           <span>{error.message}</span><button type="button" className="font-semibold underline" onClick={() => void mutate()}>Reintentar</button>
         </div>
       )}
-      {(isLoading || (isValidating && selected)) && <p role="status" className="text-sm text-muted-foreground">{data ? 'Actualizando estadísticas…' : 'Cargando estadísticas…'}</p>}
+      {(isLoading || isValidating) && <p role="status" className="text-sm text-muted-foreground">{data ? 'Actualizando estadísticas…' : 'Cargando estadísticas…'}</p>}
       {data && (
         <>
+          {!publicView && (
+            <section className={panel} aria-labelledby="production-period-heading" aria-busy={isValidating}>
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <h3 id="production-period-heading" className="text-base font-semibold">Cómo cambió la producción</h3>
+                <button type="button" className={button} onClick={() => {
+                  const month = shiftMonth(data.currentMonth, -1)
+                  setSelected({ from: month, to: month })
+                  setDraft(null)
+                  setFilterError('')
+                }}>Último mes cerrado</button>
+              </div>
+              {highlights.length > 0 && closedReport ? (
+                <>
+                  <p className="mb-3 text-sm text-muted-foreground">{formatMonthRange(closedReport.period)} frente a {formatMonthRange(closedReport.previous)}{unit ? ` · ${crops.includes(crop) ? crop : 'Todos los cultivos'} · ${unit}` : ''}</p>
+                  <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                    {highlights.map(({ metric, subject, current, previous }) => (
+                      <AnalysisNote key={metric} subject={subject} current={current} previous={previous} formatValue={(value) => showQuantity(value, unit)} lowerIsBetter={metric === 'losses'} />
+                    ))}
+                  </div>
+                  {highlights.some(({ previous }) => previous === null) && <p className="mt-2 text-xs text-muted-foreground">La comparación requiere registros en meses equivalentes para el cultivo y la unidad seleccionados.</p>}
+                </>
+              ) : <p className="text-sm text-muted-foreground">El período seleccionado todavía no tiene meses cerrados para comparar.</p>}
+            </section>
+          )}
           <div className="flex items-start gap-2 text-xs leading-5 text-muted-foreground">
             <CircleHelp className="mt-0.5 size-4 shrink-0" aria-hidden />
             <div>

@@ -18,6 +18,10 @@ yarn-error.log*
 
 # env files
 .env*
+!.env.example
+
+# local static test postgres cluster
+/.pgdata-test/
 
 # vercel
 .vercel

@@ -10,6 +10,8 @@ import {
   LogOut,
   Menu,
   Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
   Repeat,
   Sprout,
   Sun,
@@ -121,17 +123,24 @@ function ConfirmDialog({
 
 /* ───────────────────── Componente principal ───────────────────── */
 
+const SIDEBAR_STORAGE_KEY = 'lodana-sidebar-collapsed'
+
 export function AgroWorkspace({
-  title, path, sections, renderSection,
+  title, path, sections, renderSection, headerExtra, sidebarExtra, mobileDock, hideHero = false,
 }: {
   title: string
   path: string
   sections: readonly [Section, ...Section[]]
   renderSection: (sectionId: string) => ReactNode
+  headerExtra?: ReactNode
+  sidebarExtra?: ReactNode
+  mobileDock?: ReactNode
+  hideHero?: boolean
 }) {
   const params = useSearchParams()
   const { resolvedTheme, setTheme } = useTheme()
   const [mobileOpen, setMobileOpen] = useState(false)
+  const [desktopCollapsed, setDesktopCollapsed] = useState(false)
   const [confirm, setConfirm] = useState<ConfirmState>(null)
   const [leaving, setLeaving] = useState(false)
   const [leaveError, setLeaveError] = useState('')
@@ -140,6 +149,25 @@ export function AgroWorkspace({
   const current = sections.find((item) => item.id === params.get('seccion')) ?? sections[0]
   const active = current.id
   const ActiveIcon = current.icon
+
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === 'true') {
+        setDesktopCollapsed(true)
+      }
+    } catch {
+      // Ignora restricciones de almacenamiento local
+    }
+  }, [])
+
+  function setSidebarCollapsed(next: boolean) {
+    setDesktopCollapsed(next)
+    try {
+      window.localStorage.setItem(SIDEBAR_STORAGE_KEY, String(next))
+    } catch {
+      // Ignora restricciones de almacenamiento local
+    }
+  }
 
   /* Bloquea el scroll del fondo y permite cerrar el menú con Esc */
   useEffect(() => {
@@ -209,15 +237,23 @@ export function AgroWorkspace({
 
   return (
     <div className="min-h-screen bg-[#f4f7f3] text-[#20302b] dark:bg-[#0f1512] dark:text-[#edf2ed]">
-      {/* ───── Barra lateral ───── */}
+      {/* ───── Barra lateral (ocultable en teléfono y escritorio) ───── */}
       <aside
         id="production-navigation"
-        className={`fixed inset-y-0 left-0 z-40 flex w-72 max-w-[88vw] flex-col overflow-y-auto border-r border-[#dbe5db] bg-white px-4 py-5 shadow-xl transition-transform dark:border-[#29362f] dark:bg-[#141c18] lg:visible lg:translate-x-0 lg:shadow-none ${
-          mobileOpen ? 'translate-x-0' : 'invisible -translate-x-full'
+        aria-label={`Menú de ${title}`}
+        className={`fixed inset-y-0 left-0 z-40 flex w-72 max-w-[88vw] flex-col overflow-y-auto border-r border-[#dbe5db] bg-white px-4 py-5 shadow-xl transition-transform duration-200 dark:border-[#29362f] dark:bg-[#141c18] lg:shadow-none ${
+          mobileOpen ? 'visible translate-x-0' : 'invisible -translate-x-full'
+        } ${
+          desktopCollapsed ? 'lg:invisible lg:-translate-x-full' : 'lg:visible lg:translate-x-0'
         }`}
       >
         <div className="flex items-center justify-between px-2">
-          <div className="flex items-center gap-3">
+          <Link
+            href={path}
+            prefetch={false}
+            onClick={() => setMobileOpen(false)}
+            className="flex items-center gap-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#b8d8bf]"
+          >
             <div className="flex size-11 items-center justify-center rounded-2xl bg-gradient-to-br from-[#3b7a5c] to-[#24523b] text-white shadow-md shadow-[#2c6048]/30">
               <Sprout className="size-6" />
             </div>
@@ -227,15 +263,27 @@ export function AgroWorkspace({
                 {title}
               </p>
             </div>
-          </div>
+          </Link>
 
           <button
+            type="button"
             ref={closeMenu}
             aria-label="Cerrar menú"
+            title="Cerrar menú"
             onClick={() => setMobileOpen(false)}
             className={`${ui.iconBtn} lg:hidden`}
           >
             <X className="size-5" />
+          </button>
+
+          <button
+            type="button"
+            aria-label="Ocultar menú lateral"
+            title="Ocultar menú lateral"
+            onClick={() => setSidebarCollapsed(true)}
+            className={`${ui.iconBtn} hidden lg:inline-flex`}
+          >
+            <PanelLeftClose className="size-5" />
           </button>
         </div>
 
@@ -247,6 +295,8 @@ export function AgroWorkspace({
           <Repeat className="size-4" />
           Cambiar de perfil
         </button>
+
+        {sidebarExtra && <div className="mt-3">{sidebarExtra}</div>}
 
         <div className="mt-7 flex items-center gap-3 px-3">
           <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
@@ -300,6 +350,7 @@ export function AgroWorkspace({
 
       {mobileOpen && (
         <button
+          type="button"
           aria-label="Cerrar navegación"
           tabIndex={-1}
           onClick={() => setMobileOpen(false)}
@@ -308,36 +359,75 @@ export function AgroWorkspace({
       )}
 
       {/* ───── Contenido ───── */}
-      <div className="lg:pl-72" inert={mobileOpen}>
-        <header className="sticky top-0 z-20 flex h-[72px] items-center justify-between border-b border-[#dbe5db] bg-[#f4f7f3]/85 px-5 backdrop-blur-xl dark:border-[#29362f] dark:bg-[#0f1512]/85 sm:px-8">
-          <div className="flex items-center gap-3">
+      <div
+        className={`transition-[padding] duration-200 ${desktopCollapsed ? 'lg:pl-0' : 'lg:pl-72'}`}
+        inert={mobileOpen}
+      >
+        <header className="sticky top-0 z-20 flex h-[68px] items-center justify-between border-b border-[#dbe5db] bg-[#f4f7f3]/90 px-3.5 backdrop-blur-xl dark:border-[#29362f] dark:bg-[#0f1512]/90 sm:h-[72px] sm:px-8">
+          <div className="flex min-w-0 items-center gap-2.5 sm:gap-3">
             <button
+              type="button"
               aria-label="Abrir menú"
               aria-controls="production-navigation"
               aria-expanded={mobileOpen}
               onClick={() => setMobileOpen(true)}
-              className={`${ui.iconBtn} lg:hidden`}
+              className="inline-flex min-h-11 items-center gap-1.5 rounded-xl border border-[#cfdcd1] bg-white px-2.5 py-2 text-sm font-semibold text-foreground shadow-sm transition hover:bg-[#eef5ef] focus:outline-none focus:ring-2 focus:ring-[#b8d8bf] dark:border-[#34453a] dark:bg-[#18211c] dark:hover:bg-[#223027] lg:hidden"
             >
-              <Menu className="size-5" />
+              <Menu className="size-5 shrink-0" aria-hidden />
+              <span>Menú</span>
             </button>
-            <div>
+
+            <button
+              type="button"
+              aria-label={desktopCollapsed ? 'Mostrar menú lateral' : 'Ocultar menú lateral'}
+              title={desktopCollapsed ? 'Mostrar menú lateral' : 'Ocultar menú lateral'}
+              aria-controls="production-navigation"
+              aria-expanded={!desktopCollapsed}
+              onClick={() => setSidebarCollapsed(!desktopCollapsed)}
+              className="hidden min-h-10 items-center gap-1.5 rounded-xl border border-[#cfdcd1] bg-white px-3 py-2 text-sm font-semibold text-foreground shadow-sm transition hover:bg-[#eef5ef] focus:outline-none focus:ring-2 focus:ring-[#b8d8bf] dark:border-[#34453a] dark:bg-[#18211c] dark:hover:bg-[#223027] lg:inline-flex"
+            >
+              {desktopCollapsed ? (
+                <>
+                  <PanelLeftOpen className="size-4 shrink-0" aria-hidden />
+                  <span>Menú</span>
+                </>
+              ) : (
+                <>
+                  <PanelLeftClose className="size-4 shrink-0" aria-hidden />
+                  <span className="sr-only">Ocultar menú</span>
+                </>
+              )}
+            </button>
+
+            <div className="min-w-0">
               <nav
                 aria-label="Ruta de navegación"
                 className="flex items-center gap-1 text-xs text-muted-foreground"
               >
-                <span>Espacio de trabajo</span>
-                <ChevronRight className="size-3" />
-                <span className="font-medium text-foreground">
+                {active !== sections[0].id ? (
+                  <Link
+                    href={path}
+                    prefetch={false}
+                    className="truncate hover:text-foreground hover:underline"
+                  >
+                    {sections[0].label}
+                  </Link>
+                ) : (
+                  <span className="truncate">Espacio de trabajo</span>
+                )}
+                <ChevronRight className="size-3 shrink-0" />
+                <span className="truncate font-medium text-foreground">
                   {current?.label}
                 </span>
               </nav>
-              <h1 className="text-lg font-semibold sm:text-xl">
+              <h1 className="truncate text-base font-semibold sm:text-xl">
                 {title}
               </h1>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
+            {headerExtra}
             <button
               type="button"
               onClick={() => setTheme(resolvedTheme === 'dark' || resolvedTheme === 'custom' ? 'light' : 'dark')}
@@ -361,8 +451,9 @@ export function AgroWorkspace({
           </div>
         </header>
 
-        <main className="mx-auto max-w-[1400px] px-5 py-7 sm:px-8 lg:px-10">
+        <main className={`mx-auto max-w-[1400px] px-4 py-5 sm:px-8 sm:py-7 lg:px-10 ${mobileDock ? 'pb-28 lg:pb-10' : ''}`}>
           {/* Encabezado de sección */}
+          {!hideHero && (
           <div className="relative mb-7 overflow-hidden rounded-3xl border border-[#dbe7dd] bg-gradient-to-br from-white via-[#f3f8f4] to-[#e4f0e7] p-6 shadow-sm dark:border-[#2d3b32] dark:from-[#18211c] dark:via-[#17231c] dark:to-[#1c3327] sm:p-8">
             <div
               aria-hidden
@@ -394,10 +485,13 @@ export function AgroWorkspace({
               </div>
             </div>
           </div>
+          )}
 
           {renderSection(active)}
         </main>
       </div>
+
+      {mobileDock}
 
       {confirm && (
         <ConfirmDialog state={confirm} onCancel={() => setConfirm(null)} onConfirm={confirmLeave} busy={leaving} error={leaveError} />

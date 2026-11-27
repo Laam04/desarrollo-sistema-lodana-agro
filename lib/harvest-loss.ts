@@ -2,11 +2,39 @@ import { Prisma } from '@prisma/client'
 import { ProductionError } from '@/lib/production-api'
 import { activeHarvest, committedStock } from '@/lib/production-stock'
 import { cleanName, normalizeName, parseDate, parsePositiveDecimal } from '@/lib/production-validation'
+import { cleanReceiptImageName, defaultReceiptFileName, parseReceiptImageDataUrl } from '@/lib/receipt-image'
+import { retireIfExpired } from '@/lib/trash'
 
 export const lossInclude = {
   harvest: { include: { crop: true, variety: true, productionArea: true, unit: true } },
   reason: true,
 } satisfies Prisma.LossInclude
+
+export const lossSelect = {
+  id: true,
+  harvestId: true,
+  date: true,
+  quantity: true,
+  affectsHarvest: true,
+  reasonId: true,
+  notes: true,
+  evidenceImageName: true,
+  status: true,
+  createdBy: true,
+  createdAt: true,
+  updatedAt: true,
+  deletedAt: true,
+  ...lossInclude,
+} satisfies Prisma.LossSelect
+
+export function serializeLoss<T extends { id: string; evidenceImageName: string | null; updatedAt: Date }>(row: T) {
+  const hasEvidenceImage = Boolean(row.evidenceImageName)
+  return {
+    ...row,
+    hasEvidenceImage,
+    evidenceImageUrl: hasEvidenceImage ? `/api/losses/${row.id}/photo?v=${row.updatedAt.getTime()}` : null,
+  }
+}
 
 export function lossDraft(body: Record<string, unknown>) {
   const date = parseDate(body.date)
@@ -16,7 +44,30 @@ export function lossDraft(body: Record<string, unknown>) {
   if (!date || !quantity || !reason || reason.length > 120 || typeof affectsHarvest !== 'boolean') {
     throw new ProductionError('Indica fecha, cantidad positiva (hasta dos decimales), motivo y si la merma descuenta del inventario.')
   }
-  return { date, quantity, reason, affectsHarvest, notes: cleanName(body.notes).slice(0, 2000) || null }
+  let evidenceImagePatch: { evidenceImage: string | null; evidenceImageName: string | null } | undefined
+  if (body.evidenceImage !== undefined) {
+    if (body.evidenceImage === null || body.evidenceImage === '') {
+      evidenceImagePatch = { evidenceImage: null, evidenceImageName: null }
+    } else {
+      const parsedImage = parseReceiptImageDataUrl(body.evidenceImage)
+      if (!parsedImage) {
+        throw new ProductionError('La foto del daño debe ser una imagen JPG, PNG o WebP válida (máximo 1 MB).', 400)
+      }
+      evidenceImagePatch = {
+        evidenceImage: parsedImage.dataUrl,
+        evidenceImageName:
+          cleanReceiptImageName(body.evidenceImageName) ?? defaultReceiptFileName(parsedImage.mime),
+      }
+    }
+  }
+  return {
+    date,
+    quantity,
+    reason,
+    affectsHarvest,
+    notes: cleanName(body.notes).slice(0, 2000) || null,
+    evidenceImagePatch,
+  }
 }
 
 export async function saveLoss(
@@ -40,16 +91,28 @@ export async function saveLoss(
   }
 
   const normalizedName = normalizeName(draft.reason)
+  const existingReason = await tx.lossReason.findUnique({ where: { normalizedName } })
+  if (existingReason?.deletedAt && !(await retireIfExpired(tx, 'lossReason', existingReason))) {
+    throw new ProductionError('El motivo de merma está en la papelera.', 409)
+  }
   const reason = await tx.lossReason.upsert({
     where: { normalizedName },
     update: { active: true },
     create: { name: draft.reason, normalizedName },
   })
-  if (reason.deletedAt) throw new ProductionError('El motivo de merma está en la papelera.', 409)
 
-  const { date, quantity, affectsHarvest, notes } = draft
-  const data = { harvestId, date, quantity, affectsHarvest, notes, reasonId: reason.id }
-  return id
-    ? tx.loss.update({ where: { id }, data, include: lossInclude })
-    : tx.loss.create({ data: { ...data, createdBy: actor }, include: lossInclude })
+  const { date, quantity, affectsHarvest, notes, evidenceImagePatch } = draft
+  const data = {
+    harvestId,
+    date,
+    quantity,
+    affectsHarvest,
+    notes,
+    reasonId: reason.id,
+    ...(evidenceImagePatch ?? {}),
+  }
+  const saved = id
+    ? await tx.loss.update({ where: { id }, data, select: lossSelect })
+    : await tx.loss.create({ data: { ...data, createdBy: actor }, select: lossSelect })
+  return serializeLoss(saved)
 }

@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import useSWR from 'swr'
-import { productionFetch } from '@/lib/production-client'
+import { invalidateProduction, productionFetch } from '@/lib/production-client'
 
 type Category = { id: string; name: string; active: boolean }
 
@@ -35,6 +35,7 @@ export function CostCategoryField({ value, setValue, original, inputClass, butto
       setName('')
       void mutate((current) => [...(current ?? []).filter((item) => item.id !== row.id), row]
         .sort((a, b) => a.name.localeCompare(b.name, 'es-EC')))
+      void invalidateProduction('/api/costs')
     } catch (failure) {
       setFeedback(failure instanceof Error ? failure.message : 'No se pudo guardar la categoría.')
     } finally {

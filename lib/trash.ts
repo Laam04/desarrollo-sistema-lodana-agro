@@ -9,7 +9,12 @@ const entityTypes = [
   'costCategory', 'costSubcategory', 'cost', 'costAllocation',
   'shipment', 'shipmentItem', 'shipmentAllocation', 'reception', 'receptionItem',
 ] as const
-type Entity = typeof entityTypes[number]
+export type Entity = typeof entityTypes[number]
+
+export const productionTrashTypes: readonly Entity[] = [
+  'unit', 'crop', 'variety', 'productionArea', 'harvest', 'lossReason', 'loss',
+  'costCategory', 'costSubcategory', 'cost', 'costAllocation',
+]
 
 function isEntity(value: string): value is Entity {
   return entityTypes.some((type) => type === value)
@@ -24,6 +29,44 @@ function model(tx: Transaction, type: Entity): TrashModel {
   return tx[type] as unknown as TrashModel
 }
 
+export async function retireIfExpired(
+  tx: Transaction,
+  entityType: 'crop' | 'variety' | 'productionArea' | 'unit' | 'lossReason' | 'costCategory' | 'costSubcategory',
+  record: { id: string; deletedAt: Date | null },
+): Promise<boolean> {
+  if (!record.deletedAt) return false
+  const expired = await tx.trashEntry.findFirst({
+    where: { entityType, entityId: record.id, deletedAt: record.deletedAt, purgeAt: { lte: new Date() }, restoredAt: null },
+    select: { id: true },
+  })
+  if (!expired) return false
+  const retired = `~retirado-${record.id}`
+  switch (entityType) {
+    case 'crop':
+      await tx.crop.update({ where: { id: record.id }, data: { normalizedName: retired } })
+      break
+    case 'variety':
+      await tx.variety.update({ where: { id: record.id }, data: { normalizedName: retired } })
+      break
+    case 'productionArea':
+      await tx.productionArea.update({ where: { id: record.id }, data: { normalizedName: retired } })
+      break
+    case 'unit':
+      await tx.unit.update({ where: { id: record.id }, data: { name: retired } })
+      break
+    case 'lossReason':
+      await tx.lossReason.update({ where: { id: record.id }, data: { name: retired, normalizedName: retired } })
+      break
+    case 'costCategory':
+      await tx.costCategory.update({ where: { id: record.id }, data: { name: retired, normalizedName: retired } })
+      break
+    case 'costSubcategory':
+      await tx.costSubcategory.update({ where: { id: record.id }, data: { normalizedName: retired } })
+      break
+  }
+  return true
+}
+
 export async function moveToTrash(tx: Transaction, entityType: Entity, id: string, groupId: string = crypto.randomUUID(), deletedBy?: string | null) {
   const delegate = model(tx, entityType)
   const record = await delegate.findUnique({ where: { id } })
@@ -34,29 +77,46 @@ export async function moveToTrash(tx: Transaction, entityType: Entity, id: strin
 
   const purgeAt = new Date(deletedAt)
   purgeAt.setUTCDate(purgeAt.getUTCDate() + 60)
+  const sanitizedSnapshot = JSON.parse(JSON.stringify(record)) as Record<string, unknown>
+  for (const heavyField of ['receiptImage', 'evidenceImage', 'noteImage']) {
+    if (heavyField in sanitizedSnapshot) {
+      delete sanitizedSnapshot[heavyField]
+    }
+  }
   await tx.trashEntry.create({
-    data: { entityType, entityId: id, groupId, deletedAt, purgeAt, deletedBy, snapshotJson: JSON.parse(JSON.stringify(record)) },
+    data: { entityType, entityId: id, groupId, deletedAt, purgeAt, deletedBy, snapshotJson: sanitizedSnapshot as Prisma.InputJsonValue },
   })
   return { id, groupId, deletedAt, purgeAt }
 }
 
 const parents: Partial<Record<Entity, Partial<Record<Entity, string>>>> = {
+  crop: { unit: 'unitId' },
   variety: { crop: 'cropId' },
   productionArea: { crop: 'cropId' },
+  harvest: { crop: 'cropId', variety: 'varietyId', productionArea: 'productionAreaId', unit: 'unitId' },
   loss: { harvest: 'harvestId', lossReason: 'reasonId' },
   costSubcategory: { costCategory: 'categoryId' },
-  costAllocation: { cost: 'costId' },
+  cost: { costCategory: 'categoryId', costSubcategory: 'subcategoryId' },
+  costAllocation: { cost: 'costId', crop: 'cropId' },
   shipmentItem: { shipment: 'shipmentId' },
   shipmentAllocation: { shipmentItem: 'shipmentItemId', harvest: 'harvestId' },
   reception: { shipment: 'shipmentId' },
   receptionItem: { reception: 'receptionId', shipmentItem: 'shipmentItemId' },
 }
 
-export async function restoreTrash(tx: Transaction, selector: { groupId: string } | { id: string }, actor: string | null) {
+export async function restoreTrash(
+  tx: Transaction,
+  selector: { groupId: string } | { id: string },
+  actor: string | null,
+  allowedTypes?: readonly Entity[],
+) {
   const now = new Date()
   const canRestore = { restoredAt: null, purgeAt: { gt: now } }
   const entries = await tx.trashEntry.findMany({ where: { ...canRestore, ...selector } })
   if (!entries.length) throw new ProductionError('El registro no existe en la papelera o ya venció.', 404)
+  if (allowedTypes && entries.some((entry) => !allowedTypes.includes(entry.entityType as Entity))) {
+    throw new ProductionError('El perfil no tiene acceso para restaurar este registro.', 403)
+  }
   const restored = new Set<string>()
 
   async function restore(entry: typeof entries[number]) {
