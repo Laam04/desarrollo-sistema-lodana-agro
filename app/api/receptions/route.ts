@@ -40,12 +40,16 @@ const receptionLogInclude = {
 } satisfies Prisma.ReceptionFindManyArgs
 
 function withReceivedTotals(shipment: ReceptionShipment) {
+  const hasNoteImage = Boolean(shipment.noteImageName)
   return {
     id: shipment.id,
     code: shipment.code,
     date: shipment.date,
     status: shipment.status,
     notes: shipment.notes,
+    hasNoteImage,
+    noteImageName: shipment.noteImageName,
+    noteImageUrl: hasNoteImage ? `/api/receptions/${shipment.id}/photo?v=${shipment.updatedAt.getTime()}` : null,
     items: shipment.items.map(({ receptionItems, ...item }) => {
       const receivedQuantity = receptionItems.reduce(
         (total, row) => total.plus(row.receivedQuantity), new Prisma.Decimal(0),

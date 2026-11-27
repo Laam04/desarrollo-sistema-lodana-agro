@@ -2,9 +2,9 @@
 
 import Link from 'next/link'
 import { useState } from 'react'
-import { CalendarDays, ClipboardCheck, ShoppingBasket } from 'lucide-react'
+import { CalendarDays, ChevronRight, ClipboardCheck, History, ShoppingBasket } from 'lucide-react'
 import useSWR from 'swr'
-import { marketDay, units, usd, type MarketSalesSummary } from '@/lib/market-data'
+import { marketDay, units, usd, type MarketSalesSummary, type MarketShipment, type PageResult } from '@/lib/market-data'
 import { formatDate, productionFetch } from '@/lib/production-client'
 import { MarketError, marketUi } from '@/components/market-ui'
 
@@ -13,19 +13,63 @@ export function MarketSummary() {
   const { data, error, mutate } = useSWR<MarketSalesSummary>(
     '/api/market-sales?' + new URLSearchParams({ view: 'summary', date }), productionFetch,
   )
+  const { data: pendingReceptions } = useSWR<PageResult<MarketShipment>>(
+    '/api/receptions?' + new URLSearchParams({ view: 'pending', page: '1' }),
+    productionFetch,
+  )
+  const pendingCount = pendingReceptions?.rows.length ?? 0
 
   return (
-    <div className="grid gap-5">
+    <div className="grid gap-4 sm:gap-5">
+      {/* Acciones diarias directas para teléfono */}
+      <section aria-label="Acciones diarias de Agro Market" className="grid gap-3 sm:grid-cols-2">
+        <Link
+          href="/agro-market?seccion=ventas"
+          prefetch={false}
+          className="group flex items-center gap-3.5 rounded-2xl border-2 border-[#2c6048] bg-[#2c6048] p-4 text-white shadow-sm transition active:scale-[0.99] hover:bg-[#234d39] sm:p-5"
+        >
+          <span className="flex size-12 shrink-0 items-center justify-center rounded-2xl bg-white/15">
+            <ShoppingBasket className="size-6" aria-hidden />
+          </span>
+          <div className="min-w-0 flex-1">
+            <h2 className="text-lg font-bold leading-tight">Registrar venta</h2>
+            <p className="mt-0.5 text-sm text-emerald-100">Anota ventas del día y consulta existencias.</p>
+          </div>
+          <ChevronRight className="size-5 shrink-0 opacity-80 transition group-hover:translate-x-0.5" aria-hidden />
+        </Link>
+
+        <Link
+          href="/agro-market?seccion=recepciones"
+          prefetch={false}
+          className="group flex items-center gap-3.5 rounded-2xl border-2 border-[#d5e3d7] bg-white p-4 shadow-sm transition active:scale-[0.99] hover:border-[#2c6048] hover:bg-[#f7fbf7] dark:border-[#2d3b32] dark:bg-[#18211c] sm:p-5"
+        >
+          <span className="flex size-12 shrink-0 items-center justify-center rounded-2xl bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
+            <ClipboardCheck className="size-6" aria-hidden />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-lg font-bold leading-tight">Recibir cosecha</h2>
+              {pendingCount > 0 && (
+                <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-bold text-amber-900 dark:bg-amber-900/50 dark:text-amber-200">
+                  {pendingCount} pendiente(s)
+                </span>
+              )}
+            </div>
+            <p className="mt-0.5 text-sm text-muted-foreground">Confirma envíos que llegan de la finca.</p>
+          </div>
+          <ChevronRight className="size-5 shrink-0 text-muted-foreground/70 transition group-hover:translate-x-0.5 group-hover:text-[#2c6048]" aria-hidden />
+        </Link>
+      </section>
+
       <section className={`${marketUi.panel} p-4 sm:p-5`} aria-label="Indicadores semanales">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <label className="grid gap-1 text-sm font-medium">
             Fecha de la semana
             <input type="date" value={date} max={marketDay()} className={marketUi.input} onChange={(event) => { if (event.target.value) setDate(event.target.value) }} />
           </label>
-          <div className="flex flex-wrap gap-2">
-            <Link href="/agro-market?seccion=recepciones" className={marketUi.button}><ClipboardCheck className="size-4" aria-hidden /> Recibir cosecha</Link>
-            <Link href="/agro-market?seccion=ventas" className={marketUi.primary}><ShoppingBasket className="size-4" aria-hidden /> Registrar venta</Link>
-          </div>
+          <Link href="/agro-market?seccion=historial" prefetch={false} className={marketUi.button}>
+            <History className="size-4" aria-hidden /> Ver historial de recibos
+          </Link>
         </div>
         {error && <div className="mt-4"><MarketError message={error.message} retry={() => void mutate()} /></div>}
         {!error && !data && <p role="status" className="mt-4 text-sm text-muted-foreground">Cargando resumen…</p>}

@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client'
 import { ProductionError, isRecord } from '@/lib/production-api'
 import { cleanName, parseDate, parsePositiveDecimal } from '@/lib/production-validation'
 import { committedStock, endOfDay, shipmentStock } from '@/lib/production-stock'
+import { cleanReceiptImageName, defaultReceiptFileName, parseReceiptImageDataUrl } from '@/lib/receipt-image'
 import { editableShipmentStatuses } from '@/lib/shipment-status'
 
 export const shipmentInclude = {
@@ -16,6 +17,30 @@ export const shipmentInclude = {
   },
   receptions: { where: { deletedAt: null }, include: { items: { where: { deletedAt: null } } } },
 } satisfies Prisma.ShipmentInclude
+
+export const shipmentSelect = {
+  id: true,
+  requestId: true,
+  code: true,
+  date: true,
+  status: true,
+  notes: true,
+  noteImageName: true,
+  createdBy: true,
+  createdAt: true,
+  updatedAt: true,
+  deletedAt: true,
+  ...shipmentInclude,
+} satisfies Prisma.ShipmentSelect
+
+export function serializeShipment<T extends { id: string; noteImageName: string | null; updatedAt: Date }>(row: T) {
+  const hasNoteImage = Boolean(row.noteImageName)
+  return {
+    ...row,
+    hasNoteImage,
+    noteImageUrl: hasNoteImage ? `/api/shipments/${row.id}/photo?v=${row.updatedAt.getTime()}` : null,
+  }
+}
 
 const uuidRegex = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i
 
@@ -71,11 +96,34 @@ export function shipmentDraft(body: Record<string, unknown>, allowLegacy: boolea
     }
   })
 
-  return { date, items, notes: cleanName(body.notes).slice(0, 2000) || null, requestId }
+  let noteImagePatch: { noteImage: string | null; noteImageName: string | null } | undefined
+  if (body.noteImage !== undefined) {
+    if (body.noteImage === null || body.noteImage === '') {
+      noteImagePatch = { noteImage: null, noteImageName: null }
+    } else {
+      const parsedImage = parseReceiptImageDataUrl(body.noteImage)
+      if (!parsedImage) {
+        throw new ProductionError('La foto adjunta debe ser una imagen JPG, PNG o WebP válida (máximo 1 MB).', 400)
+      }
+      noteImagePatch = {
+        noteImage: parsedImage.dataUrl,
+        noteImageName:
+          cleanReceiptImageName(body.noteImageName) ?? defaultReceiptFileName(parsedImage.mime),
+      }
+    }
+  }
+
+  return {
+    date,
+    items,
+    notes: cleanName(body.notes).slice(0, 2000) || null,
+    noteImagePatch,
+    requestId,
+  }
 }
 
 export async function findShipment(tx: Prisma.TransactionClient, id: string) {
-  const shipment = await tx.shipment.findFirst({ where: { id, deletedAt: null }, include: shipmentInclude })
+  const shipment = await tx.shipment.findFirst({ where: { id, deletedAt: null }, select: shipmentSelect })
   if (!shipment) throw new ProductionError('El envío no existe o está en la papelera.', 404)
   return shipment
 }
@@ -116,19 +164,23 @@ export async function saveShipment(
   id?: string,
 ) {
   if (!id && draft.requestId) {
-    const existing = await tx.shipment.findUnique({ where: { requestId: draft.requestId }, include: shipmentInclude })
+    const existing = await tx.shipment.findUnique({ where: { requestId: draft.requestId }, select: shipmentSelect })
     if (existing) {
       if (!matchesShipmentDraft(existing, draft, actor)) {
         throw new ProductionError('La clave de solicitud ya corresponde a otro envío.', 409)
       }
-      return { shipment: existing, created: false }
+      return { shipment: serializeShipment(existing), created: false }
     }
   }
 
   const before = id ? await findShipment(tx, id) : undefined
   if (before) assertShipmentEditable(before)
 
-  const datesAndNotes = { date: draft.date, notes: draft.notes }
+  const datesAndNotes = {
+    date: draft.date,
+    notes: draft.notes,
+    ...(draft.noteImagePatch ?? {}),
+  }
   const shipment = before
     ? await tx.shipment.update({ where: { id: before.id }, data: datesAndNotes })
     : await tx.shipment.create({
@@ -221,7 +273,7 @@ export async function saveShipment(
       afterJson: JSON.parse(JSON.stringify(result)),
     },
   })
-  return { shipment: result, created: !before }
+  return { shipment: serializeShipment(result), created: !before }
 }
 
 export function productKey(item: { cropId: string; varietyId: string | null; productionAreaId: string | null; unitId: string }) {

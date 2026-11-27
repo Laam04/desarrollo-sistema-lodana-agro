@@ -3,11 +3,12 @@
 import { useDeferredValue, useRef, useState, type FormEvent } from 'react'
 import useSWR from 'swr'
 import Link from 'next/link'
-import { ClipboardCheck, Inbox, PackageCheck, Search, Truck } from 'lucide-react'
+import { ClipboardCheck, Image as ImageIcon, Inbox, PackageCheck, Search, Truck } from 'lucide-react'
 import { ApiError, createRequestId, formatDate, formatTimestampDate, invalidateProduction, productionFetch } from '@/lib/production-client'
 import { cents, decimalInput, farmSupplier, formatMarkup, markupPercent, receiptCode, units, usd, type MarketShipment, type MarketShipmentDetail, type PageResult } from '@/lib/market-data'
 import { receivableStatuses, shipmentStatusLabels } from '@/lib/shipment-status'
 import { MarketDialog, MarketError, MarketPagination, marketUi } from '@/components/market-ui'
+import { ReceiptPhotoModal } from '@/components/receipt-photo-field'
 
 type DraftLine = { quantity: string; notes: string; customerUnitPrice: string }
 type ReceiptRequest = {
@@ -151,6 +152,7 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [retryError, setRetryError] = useState('')
+  const [photoOpen, setPhotoOpen] = useState(false)
   const replay = useRef<{ draft: string; id: string } | null>(null)
 
   function line(id: string) {
@@ -237,6 +239,31 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
           <Status status={shipment.status} />
         </header>
         {shipment.notes && <p className="break-words px-4 pt-4 text-sm text-muted-foreground sm:px-5">{shipment.notes}</p>}
+        {shipment.hasNoteImage && shipment.noteImageUrl && (
+          <div className="px-4 pt-3 sm:px-5">
+            <button
+              type="button"
+              onClick={() => setPhotoOpen(true)}
+              className={marketUi.button}
+            >
+              <ImageIcon className="size-4" aria-hidden />
+              Ver foto enviada desde Producción
+            </button>
+          </div>
+        )}
+        <ReceiptPhotoModal
+          receipt={
+            photoOpen && shipment.noteImageUrl
+              ? {
+                  url: shipment.noteImageUrl,
+                  title: `${shipment.code} · ${formatDate(shipment.date)}`,
+                  fileName: shipment.noteImageName,
+                  heading: 'Foto adjunta del envío',
+                }
+              : null
+          }
+          onClose={() => setPhotoOpen(false)}
+        />
         {canReceive && (
           <p className="px-4 py-3 text-xs text-muted-foreground sm:px-5">Ingresa la cantidad que llegó físicamente. El precio al cliente es opcional y se sugiere al registrar la venta.</p>
         )}

@@ -3,7 +3,7 @@ import { prisma, runSerializable } from '@/lib/prisma'
 import { ProductionError, productionError, readBody, requireProfile } from '@/lib/production-api'
 import { historyQuery } from '@/lib/production-history'
 import { activeHarvest, activeLoss } from '@/lib/production-stock'
-import { lossDraft, lossInclude, saveLoss } from '@/lib/harvest-loss'
+import { lossDraft, lossSelect, saveLoss, serializeLoss } from '@/lib/harvest-loss'
 import { moveToTrash } from '@/lib/trash'
 
 export async function GET(request: Request) {
@@ -15,11 +15,11 @@ export async function GET(request: Request) {
         ...activeLoss, date, harvest: { ...activeHarvest, cropId },
         OR: search ? [{ notes: search }, { reason: { name: search } }, { harvest: { crop: { name: search } } }] : undefined,
       },
-      include: lossInclude,
+      select: lossSelect,
       orderBy: [{ date: 'desc' }, { id: 'desc' }],
       take, skip,
     })
-    return NextResponse.json(result(rows))
+    return NextResponse.json(result(rows.map(serializeLoss)))
   } catch (error) {
     return productionError(error, 'No se pudieron consultar las mermas.')
   }
@@ -28,7 +28,7 @@ export async function GET(request: Request) {
 async function save(request: Request, update: boolean) {
   try {
     const actor = await requireProfile(['production', 'admin'])
-    const body = await readBody(request)
+    const body = await readBody(request, 2 * 1024 * 1024)
     const { id, harvestId } = body
     if (typeof harvestId !== 'string' || !harvestId || (update && (typeof id !== 'string' || !id))) {
       throw new ProductionError('Selecciona una cosecha e indica la merma que quieres guardar.')
@@ -36,7 +36,7 @@ async function save(request: Request, update: boolean) {
     const draft = lossDraft(body)
     const row = await runSerializable(async (tx) => {
       const targetId = update && typeof id === 'string' ? id : undefined
-      const before = targetId ? await tx.loss.findFirst({ where: { id: targetId, ...activeLoss } }) : null
+      const before = targetId ? await tx.loss.findFirst({ where: { id: targetId, ...activeLoss }, select: { harvestId: true, quantity: true, affectsHarvest: true, evidenceImageName: true } }) : null
       if (targetId && !before) {
         throw new ProductionError('La merma no existe o está en la papelera.', 404)
       }
@@ -47,8 +47,20 @@ async function save(request: Request, update: boolean) {
       await tx.auditLog.create({
         data: {
           entity: 'Loss', entityId: saved.id, action: before ? 'UPDATE' : 'CREATE', actor,
-          beforeJson: before ? { harvestId: before.harvestId, quantity: before.quantity.toString(), affectsHarvest: before.affectsHarvest } : undefined,
-          afterJson: { harvestId: saved.harvestId, quantity: saved.quantity.toString(), affectsHarvest: saved.affectsHarvest },
+          beforeJson: before
+            ? {
+                harvestId: before.harvestId,
+                quantity: before.quantity.toString(),
+                affectsHarvest: before.affectsHarvest,
+                hasEvidenceImage: Boolean(before.evidenceImageName),
+              }
+            : undefined,
+          afterJson: {
+            harvestId: saved.harvestId,
+            quantity: saved.quantity.toString(),
+            affectsHarvest: saved.affectsHarvest,
+            hasEvidenceImage: saved.hasEvidenceImage,
+          },
         },
       })
       return saved

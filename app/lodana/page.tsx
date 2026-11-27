@@ -10,7 +10,7 @@ export default async function LodanaPage() {
   if (profile !== 'production' && profile !== 'admin') redirect('/')
   return (
     <Suspense fallback={<div className="p-8 text-sm text-muted-foreground">Cargando módulo de producción…</div>}>
-      <ProductionWorkspace />
+      <ProductionWorkspace profile={profile} />
     </Suspense>
   )
 }

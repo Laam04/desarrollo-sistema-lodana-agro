@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server'
 import { prisma, runSerializable } from '@/lib/prisma'
 import { ProductionError, productionError, readBody, requireProfile } from '@/lib/production-api'
 import { historyQuery } from '@/lib/production-history'
-import { matchesShipmentDraft, saveShipment, shipmentDraft, shipmentInclude } from '@/lib/shipments'
+import { matchesShipmentDraft, saveShipment, serializeShipment, shipmentDraft, shipmentSelect } from '@/lib/shipments'
 
 export async function GET(request: Request) {
   try {
@@ -17,11 +17,11 @@ export async function GET(request: Request) {
           { items: { some: { deletedAt: null, OR: [{ crop: { name: search } }, { variety: { name: search } }, { productionArea: { name: search } }] } } },
         ] : undefined,
       },
-      include: shipmentInclude,
+      select: shipmentSelect,
       orderBy: [{ date: 'desc' }, { id: 'desc' }],
       take, skip,
     })
-    return NextResponse.json(result(rows))
+    return NextResponse.json(result(rows.map(serializeShipment)))
   } catch (error) {
     return productionError(error, 'No se pudieron consultar los envíos.')
   }
@@ -30,18 +30,18 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const actor = await requireProfile(['production', 'admin'])
-    const draft = shipmentDraft(await readBody(request), true)
+    const draft = shipmentDraft(await readBody(request, 2 * 1024 * 1024), true)
     try {
       const { shipment, created } = await runSerializable((tx) => saveShipment(tx, draft, actor))
       return NextResponse.json(shipment, { status: created ? 201 : 200 })
     } catch (error) {
       if (draft.requestId && error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-        const existing = await prisma.shipment.findUnique({ where: { requestId: draft.requestId }, include: shipmentInclude })
+        const existing = await prisma.shipment.findUnique({ where: { requestId: draft.requestId }, select: shipmentSelect })
         if (existing) {
           if (!matchesShipmentDraft(existing, draft, actor)) {
             throw new ProductionError('La clave de solicitud ya corresponde a otro envío.', 409)
           }
-          return NextResponse.json(existing, { status: 200 })
+          return NextResponse.json(serializeShipment(existing), { status: 200 })
         }
       }
       throw error

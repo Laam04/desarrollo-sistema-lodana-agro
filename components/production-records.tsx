@@ -2,6 +2,7 @@
 
 import useSWR from "swr";
 import { CostCategoryField } from "@/components/cost-category-field";
+import { ReceiptPhotoField, ReceiptPhotoModal } from "@/components/receipt-photo-field";
 import { createRequestId, formatDate, invalidateProduction, productionFetch, today } from "@/lib/production-client";
 import { cents as parseCents, receiptCode } from "@/lib/market-data";
 import { editableShipmentStatuses, shipmentStatusLabels } from "@/lib/shipment-status";
@@ -19,6 +20,7 @@ import {
   Ban,
   CalendarDays,
   CheckCircle2,
+  Image as ImageIcon,
   Info,
   Inbox,
   Loader2,
@@ -117,13 +119,22 @@ type HistoryRow = {
   harvestId?: string;
   reason?: { name: string };
   affectsHarvest?: boolean | null;
+  hasEvidenceImage?: boolean;
+  evidenceImageName?: string | null;
+  evidenceImageUrl?: string | null;
   description?: string;
   category?: { id: string; name: string };
   amountUsd?: Quantity;
   applicationType?: string;
+  hasReceiptImage?: boolean;
+  receiptImageName?: string | null;
+  receiptImageUrl?: string | null;
   allocations?: { cropId: string | null; crop: Crop | null; amountUsd: Quantity | null }[];
   code?: string;
   status?: string;
+  hasNoteImage?: boolean;
+  noteImageName?: string | null;
+  noteImageUrl?: string | null;
   items?: ShipmentProduct[];
   receptions?: { receiptNumber?: number; items: { shipmentItemId: string; receivedQuantity: Quantity }[] }[];
 };
@@ -470,14 +481,15 @@ function SectionTitle({
 /* ───────────────────── Pantalla principal ───────────────────── */
 
 export function ProductionRecords({ active }: { active: string }) {
-  const isHarvests = active === "cosechas";
+  const isDirectLosses = active === "mermas";
+  const isHarvests = active === "cosechas" || isDirectLosses;
   const isShipments = active === "envios";
   const isCosts = active === "costos";
 
   const [harvestView, setHarvestView] = useState<"cosechas" | "mermas">(
-    "cosechas",
+    isDirectLosses ? "mermas" : "cosechas",
   );
-  const isLosses = isHarvests && harvestView === "mermas";
+  const isLosses = isDirectLosses || (isHarvests && harvestView === "mermas");
 
   const formRef = useRef<HTMLFormElement>(null);
 
@@ -490,6 +502,10 @@ export function ProductionRecords({ active }: { active: string }) {
   );
   const [editingCode, setEditingCode] = useState("");
   const [shipmentNotes, setShipmentNotes] = useState("");
+  const [editingShipmentPhotoUrl, setEditingShipmentPhotoUrl] = useState<string | null>(null);
+  const [shipmentPhotoAction, setShipmentPhotoAction] = useState<"keep" | "replace" | "remove">("keep");
+  const [shipmentPhotoDataUrl, setShipmentPhotoDataUrl] = useState<string | null>(null);
+  const [shipmentPhotoName, setShipmentPhotoName] = useState<string | null>(null);
   const [shipmentLines, setShipmentLines] = useState<ShipmentLine[]>(() => [
     emptyShipmentLine(),
   ]);
@@ -543,6 +559,13 @@ export function ProductionRecords({ active }: { active: string }) {
   const [costApplication, setCostApplication] = useState("GENERAL");
   const [costCropIds, setCostCropIds] = useState<string[]>([]);
   const [costCategoryId, setCostCategoryId] = useState("");
+  const [costReceiptAction, setCostReceiptAction] = useState<"keep" | "replace" | "remove">("keep");
+  const [costReceiptDataUrl, setCostReceiptDataUrl] = useState<string | null>(null);
+  const [costReceiptName, setCostReceiptName] = useState<string | null>(null);
+  const [lossPhotoAction, setLossPhotoAction] = useState<"keep" | "replace" | "remove">("keep");
+  const [lossPhotoDataUrl, setLossPhotoDataUrl] = useState<string | null>(null);
+  const [lossPhotoName, setLossPhotoName] = useState<string | null>(null);
+  const [viewingReceipt, setViewingReceipt] = useState<{ url: string; title: string; fileName?: string | null; heading?: string } | null>(null);
 
   const [message, setMessage] = useState<Message | null>(null);
   const [saving, setSaving] = useState(false);
@@ -814,6 +837,10 @@ export function ProductionRecords({ active }: { active: string }) {
     setEditingCode("");
     setFormDate(today());
     setShipmentNotes("");
+    setEditingShipmentPhotoUrl(null);
+    setShipmentPhotoAction("keep");
+    setShipmentPhotoDataUrl(null);
+    setShipmentPhotoName(null);
     setShipmentLines([emptyShipmentLine()]);
   }
 
@@ -834,6 +861,10 @@ export function ProductionRecords({ active }: { active: string }) {
     setEditingCode(row.code || "");
     setFormDate(String(row.date).slice(0, 10));
     setShipmentNotes(row.notes || "");
+    setEditingShipmentPhotoUrl(row.noteImageUrl ?? null);
+    setShipmentPhotoAction("keep");
+    setShipmentPhotoDataUrl(null);
+    setShipmentPhotoName(row.noteImageName ?? null);
     setShipmentLines(lines.length > 0 ? lines : [emptyShipmentLine()]);
     setMessage(null);
 
@@ -858,10 +889,15 @@ export function ProductionRecords({ active }: { active: string }) {
         notes: line.notes,
       }));
 
-      const draftBody = {
+      const draftBody: Record<string, unknown> = {
         date: formDate,
         notes: shipmentNotes,
         items,
+        ...(shipmentPhotoAction === "replace" && shipmentPhotoDataUrl
+          ? { noteImage: shipmentPhotoDataUrl, noteImageName: shipmentPhotoName }
+          : shipmentPhotoAction === "remove"
+            ? { noteImage: null, noteImageName: null }
+            : {}),
       };
       const snapshot = JSON.stringify(draftBody);
       if (!wasEditing && shipmentReplayRef.current?.draft !== snapshot) {
@@ -950,6 +986,12 @@ export function ProductionRecords({ active }: { active: string }) {
     setCostApplication("GENERAL");
     setCostCropIds([]);
     setCostCategoryId("");
+    setCostReceiptAction("keep");
+    setCostReceiptDataUrl(null);
+    setCostReceiptName(null);
+    setLossPhotoAction("keep");
+    setLossPhotoDataUrl(null);
+    setLossPhotoName(null);
     setFormDate(today());
   }
 
@@ -963,6 +1005,12 @@ export function ProductionRecords({ active }: { active: string }) {
     setCostApplication(row.applicationType === "CROP" || row.allocations?.length ? "CROP" : "GENERAL");
     setCostCropIds(row.allocations?.flatMap((item) => item.cropId ? [item.cropId] : []) ?? []);
     setCostCategoryId(row.category?.id ?? "");
+    setCostReceiptAction("keep");
+    setCostReceiptDataUrl(null);
+    setCostReceiptName(row.receiptImageName ?? null);
+    setLossPhotoAction("keep");
+    setLossPhotoDataUrl(null);
+    setLossPhotoName(row.evidenceImageName ?? null);
     setMessage(null);
     formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
@@ -982,10 +1030,24 @@ export function ProductionRecords({ active }: { active: string }) {
     if (editingRecord) payload.id = editingRecord.id;
     if (isLosses) {
       payload.affectsHarvest = payload.affectsHarvest === 'true';
+      if (lossPhotoAction === 'replace' && lossPhotoDataUrl) {
+        payload.evidenceImage = lossPhotoDataUrl;
+        payload.evidenceImageName = lossPhotoName;
+      } else if (lossPhotoAction === 'remove') {
+        payload.evidenceImage = null;
+        payload.evidenceImageName = null;
+      }
     } else if (isHarvests) {
       payload.cropId = cropId;
-    } else if (isCosts && costApplication === 'CROP') {
-      payload.cropIds = costCropIds;
+    } else if (isCosts) {
+      if (costApplication === 'CROP') payload.cropIds = costCropIds;
+      if (costReceiptAction === 'replace' && costReceiptDataUrl) {
+        payload.receiptImage = costReceiptDataUrl;
+        payload.receiptImageName = costReceiptName;
+      } else if (costReceiptAction === 'remove') {
+        payload.receiptImage = null;
+        payload.receiptImageName = null;
+      }
     }
     return productionFetch(endpoint, {
       method: editingRecord ? "PATCH" : "POST",
@@ -1160,7 +1222,7 @@ export function ProductionRecords({ active }: { active: string }) {
     <div className="mt-7 grid items-start gap-5 xl:grid-cols-[minmax(340px,0.85fr)_minmax(0,1.15fr)]">
       <Toast message={message} onClose={() => setMessage(null)} />
 
-      {isHarvests && (
+      {isHarvests && !isDirectLosses && (
         <div
           role="group"
           aria-label="Vista de producción"
@@ -1338,6 +1400,40 @@ export function ProductionRecords({ active }: { active: string }) {
                 <Field label="Observaciones">
                   <textarea name="notes" rows={2} maxLength={2000} defaultValue={editingRecord?.notes ?? ''} className={inputCls} />
                 </Field>
+
+                <div className="grid gap-1.5 text-sm font-medium">
+                  <span>Foto o imagen del daño o pérdida (opcional)</span>
+                  <ReceiptPhotoField
+                    compact
+                    previewUrl={
+                      lossPhotoAction === "replace"
+                        ? lossPhotoDataUrl
+                        : lossPhotoAction === "remove"
+                          ? null
+                          : editingRecord?.evidenceImageUrl ?? null
+                    }
+                    fileName={
+                      lossPhotoAction === "replace"
+                        ? lossPhotoName
+                        : lossPhotoAction === "remove"
+                          ? null
+                          : editingRecord?.evidenceImageName ?? null
+                    }
+                    helperText="Opcional: toma una foto con tu teléfono o sube una imagen como evidencia del daño o pérdida."
+                    onChange={(next) => {
+                      if (next) {
+                        setLossPhotoAction("replace");
+                        setLossPhotoDataUrl(next.dataUrl);
+                        setLossPhotoName(next.name);
+                      } else {
+                        setLossPhotoAction("remove");
+                        setLossPhotoDataUrl(null);
+                        setLossPhotoName(null);
+                      }
+                    }}
+                    onError={(msg) => setMessage({ kind: "error", text: msg })}
+                  />
+                </div>
               </>
             )}
 
@@ -1519,6 +1615,39 @@ export function ProductionRecords({ active }: { active: string }) {
                 <Field label="Observaciones">
                   <textarea name="notes" rows={2} maxLength={2000} defaultValue={editingRecord?.notes ?? ''} className={inputCls} />
                 </Field>
+
+                <div className="grid gap-1.5 text-sm font-medium">
+                  <span>Foto o imagen de factura (opcional)</span>
+                  <ReceiptPhotoField
+                    compact
+                    previewUrl={
+                      costReceiptAction === "replace"
+                        ? costReceiptDataUrl
+                        : costReceiptAction === "remove"
+                          ? null
+                          : editingRecord?.receiptImageUrl ?? null
+                    }
+                    fileName={
+                      costReceiptAction === "replace"
+                        ? costReceiptName
+                        : costReceiptAction === "remove"
+                          ? null
+                          : editingRecord?.receiptImageName ?? null
+                    }
+                    onChange={(next) => {
+                      if (next) {
+                        setCostReceiptAction("replace");
+                        setCostReceiptDataUrl(next.dataUrl);
+                        setCostReceiptName(next.name);
+                      } else {
+                        setCostReceiptAction("remove");
+                        setCostReceiptDataUrl(null);
+                        setCostReceiptName(null);
+                      }
+                    }}
+                    onError={(msg) => setMessage({ kind: "error", text: msg })}
+                  />
+                </div>
               </>
             )}
 
@@ -1873,6 +2002,40 @@ export function ProductionRecords({ active }: { active: string }) {
                     className={inputCls}
                   />
                 </Field>
+
+                <div className="grid gap-1.5 text-sm font-medium">
+                  <span>Foto o imagen para Agro Market (opcional)</span>
+                  <ReceiptPhotoField
+                    compact
+                    previewUrl={
+                      shipmentPhotoAction === "replace"
+                        ? shipmentPhotoDataUrl
+                        : shipmentPhotoAction === "remove"
+                          ? null
+                          : editingShipmentPhotoUrl
+                    }
+                    fileName={
+                      shipmentPhotoAction === "replace"
+                        ? shipmentPhotoName
+                        : shipmentPhotoAction === "remove"
+                          ? null
+                          : shipmentPhotoName
+                    }
+                    helperText="Opcional: toma una foto con tu teléfono o sube una imagen de la carga o guía para Agro Market."
+                    onChange={(next) => {
+                      if (next) {
+                        setShipmentPhotoAction("replace");
+                        setShipmentPhotoDataUrl(next.dataUrl);
+                        setShipmentPhotoName(next.name);
+                      } else {
+                        setShipmentPhotoAction("remove");
+                        setShipmentPhotoDataUrl(null);
+                        setShipmentPhotoName(null);
+                      }
+                    }}
+                    onError={(msg) => setMessage({ kind: "error", text: msg })}
+                  />
+                </div>
               </>
             )}
           </div>
@@ -2018,6 +2181,33 @@ export function ProductionRecords({ active }: { active: string }) {
                   }
                   onDelete={!isShipments ? () => setRecordToDelete(row) : undefined}
                   onLogLoss={isHarvests && !isLosses ? () => logLossFor(row) : undefined}
+                  onViewReceipt={
+                    isCosts && row.hasReceiptImage && row.receiptImageUrl
+                      ? () =>
+                          setViewingReceipt({
+                            url: row.receiptImageUrl!,
+                            title: `${row.description || "Costo"} · ${formatDate(row.date)}`,
+                            fileName: row.receiptImageName,
+                            heading: "Foto de factura",
+                          })
+                      : isShipments && row.hasNoteImage && row.noteImageUrl
+                        ? () =>
+                            setViewingReceipt({
+                              url: row.noteImageUrl!,
+                              title: `${row.code || "Envío"} · ${formatDate(row.date)}`,
+                              fileName: row.noteImageName,
+                              heading: "Foto del envío para Agro Market",
+                            })
+                        : isLosses && row.hasEvidenceImage && row.evidenceImageUrl
+                          ? () =>
+                              setViewingReceipt({
+                                url: row.evidenceImageUrl!,
+                                title: `${row.harvest?.crop?.name || "Merma"} · ${formatDate(row.date)}`,
+                                fileName: row.evidenceImageName,
+                                heading: "Foto del daño o pérdida",
+                              })
+                          : undefined
+                  }
                 />
               ))
             ) : (
@@ -2050,6 +2240,8 @@ export function ProductionRecords({ active }: { active: string }) {
       </section>
 
       {/* ─────────── Confirmaciones ─────────── */}
+
+      <ReceiptPhotoModal receipt={viewingReceipt} onClose={() => setViewingReceipt(null)} />
 
       {/* Guardar cosecha / merma / costo */}
       <ConfirmDialog
@@ -2348,6 +2540,7 @@ function HistoryCard({
   onEdit,
   onCancel,
   onLogLoss,
+  onViewReceipt,
 }: {
   row: HistoryRow;
   active: string;
@@ -2356,9 +2549,15 @@ function HistoryCard({
   onEdit?: () => void;
   onCancel?: () => void;
   onLogLoss?: () => void;
+  onViewReceipt?: () => void;
 }) {
-  const actions = (onEdit || onDelete || onLogLoss) && (
+  const actions = (onEdit || onDelete || onLogLoss || onViewReceipt) && (
     <div className="mt-3 flex flex-wrap justify-end gap-2 border-t border-border/70 pt-3">
+      {onViewReceipt && (
+        <button type="button" onClick={onViewReceipt} className={btnSmall}>
+          <ImageIcon className="size-3.5" /> {active === "costos" ? "Ver factura" : "Ver foto"}
+        </button>
+      )}
       {onLogLoss && <button type="button" onClick={onLogLoss} className={btnSmall}><Plus className="size-3.5" /> Registrar merma</button>}
       {onEdit && <button type="button" onClick={onEdit} className={btnSmall}><Pencil className="size-3.5" /> Editar</button>}
       {onDelete && <button type="button" onClick={onDelete} className={`${btnSmall} text-red-700 dark:text-red-300`}><Trash2 className="size-3.5" /> Eliminar</button>}
@@ -2605,15 +2804,21 @@ function HistoryCard({
           </p>
         )}
 
-        {canModify && (onEdit || onCancel) && (
+        {(onViewReceipt || (canModify && (onEdit || onCancel))) && (
           <div className="mt-3 flex flex-wrap justify-end gap-2 border-t border-border/70 pt-3">
-            {onEdit && (
+            {onViewReceipt && (
+              <button type="button" onClick={onViewReceipt} className={btnSmall}>
+                <ImageIcon className="size-3.5" />
+                Ver foto
+              </button>
+            )}
+            {canModify && onEdit && (
               <button type="button" onClick={onEdit} className={btnSmall}>
                 <Pencil className="size-3.5" />
                 Editar envío
               </button>
             )}
-            {onCancel && (
+            {canModify && onCancel && (
               <button
                 type="button"
                 onClick={onCancel}

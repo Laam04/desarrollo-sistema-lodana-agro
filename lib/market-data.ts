@@ -69,6 +69,9 @@ export type MarketShipment = {
   date: string
   status: string
   notes: string | null
+  hasNoteImage?: boolean
+  noteImageName?: string | null
+  noteImageUrl?: string | null
   items: ShipmentProduct[]
 }
 

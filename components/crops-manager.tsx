@@ -594,12 +594,30 @@ export function CropsManager() {
 
     setError('')
 
+    const existingActiveCrop =
+      !editingCrop &&
+      crops.find(
+        (crop) =>
+          crop.active &&
+          normalizeCatalogName(crop.name) === normalizeCatalogName(name),
+      )
+
     askConfirm({
-      title: editingCrop ? 'Guardar cambios' : 'Guardar nuevo cultivo',
+      title: editingCrop
+        ? 'Guardar cambios'
+        : existingActiveCrop
+          ? 'Agregar zonas al cultivo existente'
+          : 'Guardar nuevo cultivo',
       description: editingCrop
         ? `Se actualizará la configuración de "${editingCrop.name}". Los registros anteriores no se modificarán.`
-        : `Se creará el cultivo "${name.trim()}" y quedará disponible para registrar cosechas.`,
-      confirmLabel: editingCrop ? 'Guardar cambios' : 'Guardar cultivo',
+        : existingActiveCrop
+          ? `El cultivo "${existingActiveCrop.name}" ya está registrado. Se vincularán las zonas seleccionadas sin duplicarlo.`
+          : `Se creará el cultivo "${name.trim()}" y quedará disponible para registrar cosechas.`,
+      confirmLabel: editingCrop
+        ? 'Guardar cambios'
+        : existingActiveCrop
+          ? 'Agregar zonas'
+          : 'Guardar cultivo',
       tone: 'default',
       action: saveCrop,
     })

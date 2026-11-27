@@ -9,7 +9,7 @@ export async function PATCH(request: Request, { params }: RouteContext) {
   try {
     const actor = await requireProfile(['production', 'admin'])
     const { id } = await params
-    const draft = shipmentDraft(await readBody(request), false)
+    const draft = shipmentDraft(await readBody(request, 2 * 1024 * 1024), false)
     const { shipment } = await runSerializable((tx) => saveShipment(tx, draft, actor, id))
     return NextResponse.json(shipment)
   } catch (error) {

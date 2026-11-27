@@ -4,13 +4,35 @@ import { prisma, runSerializable } from '@/lib/prisma'
 import { isRecord, ProductionError, productionError, readBody, requireProfile } from '@/lib/production-api'
 import { historyQuery } from '@/lib/production-history'
 import { cleanName, normalizeName, parseDate, parseDecimal, parsePositiveDecimal } from '@/lib/production-validation'
+import { cleanReceiptImageName, defaultReceiptFileName, parseReceiptImageDataUrl } from '@/lib/receipt-image'
 import { moveToTrash, retireIfExpired } from '@/lib/trash'
 
-const costInclude = {
+const costSelect = {
+  id: true,
+  date: true,
+  description: true,
+  categoryId: true,
+  subcategoryId: true,
+  amountUsd: true,
+  notes: true,
+  receiptImageName: true,
+  applicationType: true,
+  createdAt: true,
+  updatedAt: true,
+  deletedAt: true,
   category: true,
   subcategory: true,
   allocations: { where: { deletedAt: null }, include: { crop: true } },
-} satisfies Prisma.CostInclude
+} satisfies Prisma.CostSelect
+
+function serializeCost<T extends { id: string; receiptImageName: string | null; updatedAt: Date }>(row: T) {
+  const hasReceiptImage = Boolean(row.receiptImageName)
+  return {
+    ...row,
+    hasReceiptImage,
+    receiptImageUrl: hasReceiptImage ? `/api/costs/${row.id}/receipt?v=${row.updatedAt.getTime()}` : null,
+  }
+}
 
 type Allocation = { cropId: string | null; amountUsd: Prisma.Decimal | null; percent: Prisma.Decimal | null }
 
@@ -59,11 +81,11 @@ export async function GET(request: Request) {
           { allocations: { some: { deletedAt: null, crop: { name: search } } } },
         ] : undefined,
       },
-      include: costInclude,
+      select: costSelect,
       orderBy: [{ date: 'desc' }, { id: 'desc' }],
       take, skip,
     })
-    return NextResponse.json(result(rows))
+    return NextResponse.json(result(rows.map(serializeCost)))
   } catch (error) {
     return productionError(error, 'No se pudieron consultar los costos.')
   }
@@ -72,7 +94,7 @@ export async function GET(request: Request) {
 async function save(request: Request, update: boolean) {
   try {
     const actor = await requireProfile(['production', 'admin'])
-    const body = await readBody(request)
+    const body = await readBody(request, 2 * 1024 * 1024)
     const id = typeof body.id === 'string' ? body.id : ''
     const date = parseDate(body.date)
     const description = cleanName(body.description)
@@ -93,8 +115,24 @@ async function save(request: Request, update: boolean) {
     const applicationType = body.applicationType || (explicit?.length || selected?.length ? 'CROP' : 'GENERAL')
     if (applicationType !== 'CROP' && applicationType !== 'GENERAL') throw new ProductionError('Selecciona una aplicación válida.')
 
+    let receiptPatch: { receiptImage: string | null; receiptImageName: string | null } | undefined
+    if (body.receiptImage !== undefined) {
+      if (body.receiptImage === null || body.receiptImage === '') {
+        receiptPatch = { receiptImage: null, receiptImageName: null }
+      } else {
+        const parsedReceipt = parseReceiptImageDataUrl(body.receiptImage)
+        if (!parsedReceipt) {
+          throw new ProductionError('La foto de la factura debe ser una imagen JPG, PNG o WebP válida (máximo 1 MB).', 400)
+        }
+        receiptPatch = {
+          receiptImage: parsedReceipt.dataUrl,
+          receiptImageName: cleanReceiptImageName(body.receiptImageName) ?? defaultReceiptFileName(parsedReceipt.mime),
+        }
+      }
+    }
+
     const row = await runSerializable(async (tx) => {
-      const before = update ? await tx.cost.findFirst({ where: { id, deletedAt: null }, include: costInclude }) : null
+      const before = update ? await tx.cost.findFirst({ where: { id, deletedAt: null }, select: costSelect }) : null
       if (update && !before) throw new ProductionError('El costo no existe o está en la papelera.', 404)
       const unchanged = selected && before && selected.length === before.allocations.length &&
         selected.every((cid) => before.allocations.some((item) => item.cropId === cid)) &&
@@ -138,10 +176,11 @@ async function save(request: Request, update: boolean) {
       const data = {
         date, description, categoryId: category.id, amountUsd, applicationType,
         notes: cleanName(body.notes).slice(0, 2000) || null,
+        ...(receiptPatch ?? {}),
       }
       let saved
       if (!before) {
-        saved = await tx.cost.create({ data: { ...data, allocations: { create: next } }, include: costInclude })
+        saved = await tx.cost.create({ data: { ...data, allocations: { create: next } }, select: costSelect })
       } else {
         const changeAllocations = allocations !== undefined || applicationType === 'GENERAL'
         if (changeAllocations) {
@@ -154,17 +193,27 @@ async function save(request: Request, update: boolean) {
             subcategoryId: before.categoryId === category.id ? before.subcategoryId : null,
             allocations: changeAllocations ? { create: next } : undefined,
           },
-          include: costInclude,
+          select: costSelect,
         })
       }
       await tx.auditLog.create({
         data: {
           entity: 'Cost', entityId: saved.id, action: before ? 'UPDATE' : 'CREATE', actor,
-          beforeJson: before ? { amountUsd: before.amountUsd.toString(), description: before.description } : undefined,
-          afterJson: { amountUsd: saved.amountUsd.toString(), description: saved.description },
+          beforeJson: before
+            ? {
+                amountUsd: before.amountUsd.toString(),
+                description: before.description,
+                hasReceiptImage: Boolean(before.receiptImageName),
+              }
+            : undefined,
+          afterJson: {
+            amountUsd: saved.amountUsd.toString(),
+            description: saved.description,
+            hasReceiptImage: Boolean(saved.receiptImageName),
+          },
         },
       })
-      return saved
+      return serializeCost(saved)
     })
     return NextResponse.json(row, { status: update ? 200 : 201 })
   } catch (error) {
