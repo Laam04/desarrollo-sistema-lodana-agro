@@ -2,11 +2,12 @@
 
 import Link from 'next/link'
 import { useState } from 'react'
-import { CalendarDays, ChevronRight, ClipboardCheck, History, ShoppingBasket, Tag } from 'lucide-react'
+import { CalendarDays, ChevronRight, ClipboardCheck, History, ShoppingBasket } from 'lucide-react'
 import useSWR from 'swr'
 import { marketDay, units, usd, type MarketSalesSummary, type MarketShipment, type PageResult } from '@/lib/market-data'
 import { formatDate, productionFetch } from '@/lib/production-client'
 import { MarketError, marketUi } from '@/components/market-ui'
+import { AnalysisNote } from '@/components/analysis-note'
 
 export function MarketSummary() {
   const [date, setDate] = useState(marketDay)
@@ -68,9 +69,6 @@ export function MarketSummary() {
             <input type="date" value={date} max={marketDay()} className={marketUi.input} onChange={(event) => { if (event.target.value) setDate(event.target.value) }} />
           </label>
           <div className="flex flex-wrap gap-2">
-            <Link href="/agro-market?seccion=precios" prefetch={false} className={marketUi.button}>
-              <Tag className="size-4" aria-hidden /> Precios de mercado
-            </Link>
             <Link href="/agro-market?seccion=historial" prefetch={false} className={marketUi.button}>
               <History className="size-4" aria-hidden /> Ver historial de recibos
             </Link>
@@ -80,6 +78,19 @@ export function MarketSummary() {
         {!error && !data && <p role="status" className="mt-4 text-sm text-muted-foreground">Cargando resumen…</p>}
         {data && (
           <>
+            <div className="mt-4 grid gap-2" aria-label="Comparación de ventas">
+              {data.comparison.salesChange !== null ? (
+                <>
+                  <AnalysisNote change={data.comparison.salesChange / 100} subject="ventas en dólares" />
+                  <p className="text-xs text-muted-foreground">Días cerrados hasta el {formatDate(data.comparison.through!)} frente a los mismos días de la semana anterior.</p>
+                </>
+              ) : (
+                <p className="text-sm text-muted-foreground">{data.comparison.through ? 'La semana anterior aún no aporta ventas para calcular una variación en esos días.' : 'La comparación se mostrará cuando cierre el primer día de la semana.'}</p>
+              )}
+              {data.profit !== null && Number(data.profit) < 0 && (
+                <p className="rounded-xl bg-red-50 px-3 py-2 text-sm font-semibold text-red-900 dark:bg-red-950/50 dark:text-red-200">Pérdida bruta estimada de {usd(Math.abs(Number(data.profit)))} en ventas con costo registrado.</p>
+              )}
+            </div>
             <p className="mt-4 flex items-center gap-2 text-sm text-muted-foreground">
               <CalendarDays className="size-4" aria-hidden /> Semana del {formatDate(data.from)} al {formatDate(data.to)}
             </p>

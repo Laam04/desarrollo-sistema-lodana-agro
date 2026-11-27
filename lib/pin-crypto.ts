@@ -1,7 +1,7 @@
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
 
 export function isValidPin(value: unknown): value is string {
-  return typeof value === 'string' && value.length >= 4 && value.length <= 64 && !/[\r\n]/.test(value)
+  return typeof value === 'string' && value.length === 4 && !/[\r\n]/.test(value)
 }
 
 export function hashPin(pin: string): string {

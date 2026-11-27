@@ -8,8 +8,8 @@ import { retireIfExpired } from '@/lib/trash'
 
 export async function GET(request: Request) {
   try {
-    await requireProfile(['production', 'admin'])
-    const includeInactive = new URL(request.url).searchParams.get('includeInactive') === 'true'
+    const actor = await requireProfile(['production', 'reception', 'admin'])
+    const includeInactive = actor !== 'reception' && new URL(request.url).searchParams.get('includeInactive') === 'true'
     const units = await prisma.unit.findMany({
       where: { deletedAt: null, active: includeInactive ? undefined : true },
       orderBy: { name: 'asc' },

@@ -9,7 +9,7 @@ const headers = { 'Cache-Control': 'private, no-store', 'X-Content-Type-Options'
 export async function POST(request: Request) {
   try {
     const actor = await requireProfile(['admin'])
-    const body = await readBody(request, 16 * 1024).catch(() => ({} as Record<string, unknown>))
+    const body = await readBody(request, 16 * 1024)
 
     const targetMonth = typeof body.targetMonth === 'string' && body.targetMonth.trim()
       ? body.targetMonth.trim()

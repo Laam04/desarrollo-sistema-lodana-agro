@@ -1,14 +1,18 @@
 'use client'
 
-import Link from 'next/link'
+import { Combobox } from '@base-ui/react/combobox'
 import { useDeferredValue, useRef, useState, type FormEvent } from 'react'
-import { ArrowLeftRight, Banknote, Download, Pencil, Plus, Search, ShoppingBasket, Tag, Trash2 } from 'lucide-react'
+import { ArrowLeftRight, Banknote, ChevronDown, Download, Pencil, Plus, Search, ShoppingBasket, Trash2, X } from 'lucide-react'
 import useSWR from 'swr'
 import { ApiError, createRequestId, formatDate, invalidateProduction, productionFetch } from '@/lib/production-client'
 import { cents, decimalInput, farmSupplier, formatMarkup, isValidIsoDay, marketDay, marketWeek, markupPercent, receiptCode, salesValue, sheetColumns, suggestRetailSalePrice, units, usd, type PageResult, type SaleRow, type SalesDay, type StockRow } from '@/lib/market-data'
 import { MarketDialog, MarketError, MarketPagination, marketUi } from '@/components/market-ui'
 
 const salesApi = '/api/market-sales'
+
+function stockLabel(item: SaleRow['product']) {
+  return [item.crop, item.variety, item.area, item.unit, receiptCode(item.receiptNumber)].filter(Boolean).join(' · ')
+}
 
 export function MarketSales() {
   const [date, setDate] = useState(marketDay)
@@ -205,6 +209,8 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
   const [error, setError] = useState('')
   const [retrying, setRetrying] = useState(false)
   const replay = useRef<{ draft: string; id: string } | null>(null)
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const stockInput = useRef<HTMLInputElement>(null)
 
   const [convertOpen, setConvertOpen] = useState(false)
   const [convertUnitId, setConvertUnitId] = useState('')
@@ -221,17 +227,15 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
     product ? salesApi + '?' + new URLSearchParams({ ...stockParams, itemId: product.id, page: '1' }) : null,
     productionFetch,
   )
-  const { data: priceCatalog } = useSWR<{ units: { id: string; name: string }[] }>(
-    convertOpen ? '/api/market-prices' : null,
+  const { data: unitOptions = [] } = useSWR<{ id: string; name: string }[]>(
+    convertOpen ? '/api/units' : null,
     productionFetch,
   )
 
-  const products = data?.rows ?? []
+  const products = query === search ? data?.rows ?? [] : []
   const liveSelection = selection?.rows[0] ?? null
   const available = liveSelection?.available
-  const activeMarketPrice = liveSelection?.marketPrice ?? product?.marketPrice ?? null
   const retailSuggestion = suggestRetailSalePrice(
-    activeMarketPrice,
     product?.productionUnitPrice ?? null,
     product?.customerUnitPrice ?? null,
   )
@@ -282,7 +286,7 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
       setQuantity('')
       setPrice('')
       void reloadStock()
-      void invalidateProduction(salesApi, '/api/receptions', '/api/market-prices')
+      void invalidateProduction(salesApi, '/api/receptions', '/api/units')
       onSaved(
         `Presentación cambiada: ${converted.fromQuantity} ${converted.fromUnit} → ${converted.toQuantity} ${converted.toUnit} de ${converted.crop}.`,
       )
@@ -334,36 +338,73 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
         <h3 id="market-sale-editor" className="flex items-center gap-2 font-semibold"><ShoppingBasket className="size-5 text-emerald-700 dark:text-emerald-300" aria-hidden />{editing ? 'Editar venta' : 'Registrar venta'} · {formatDate(date)}</h3>
       </header>
       <form onSubmit={save} className="grid gap-4 p-4 sm:p-5">
-        <div className="grid gap-3 md:grid-cols-2">
-          <label className="relative grid gap-1 text-sm font-medium">
-            Buscar productos con saldo
-            <Search className="pointer-events-none absolute bottom-2.5 left-3 size-4 text-muted-foreground" aria-hidden />
-            <input type="search" placeholder="Ej. Plátano, REC-001 o ENV-…" aria-describedby="market-stock-search-help" value={query} maxLength={120} onChange={(event) => { setQuery(event.target.value); setPage(1) }} className={`${marketUi.input} pl-9`} />
-          </label>
-          <label className="grid gap-1 text-sm font-medium">
-            Producto del recibo
-            <select required value={product?.id ?? ''} className={marketUi.input} onChange={(event) => {
-              const item = products.find((item) => item.id === event.target.value) ?? null
-              setProduct(item)
+        <Combobox.Root<SaleRow['product']>
+          items={products}
+          filter={null}
+          value={product}
+          inputValue={product ? stockLabel(product) : query}
+          itemToStringLabel={stockLabel}
+          isItemEqualToValue={(item, value) => item.id === value.id}
+          open={pickerOpen}
+          onOpenChange={setPickerOpen}
+          disabled={busy}
+          onInputValueChange={(value, details) => {
+            if (details.reason === 'input-change' || details.reason === 'input-clear') {
+              setQuery(value)
+              setPage(1)
+              setProduct(null)
               if (!editing) setPrice('')
               setError('')
-            }}>
-              <option value="">Selecciona un producto</option>
-              {product && !products.some((item) => item.id === product.id) && (
-                <option value={product.id}>{receiptCode(product.receiptNumber)} · {product.crop} · {product.unit}</option>
+            }
+          }}
+          onValueChange={(item) => {
+            setProduct(item)
+            setQuery('')
+            setPage(1)
+            if (!editing) setPrice('')
+            setError('')
+          }}
+        >
+          <div className="grid gap-1.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <Combobox.Label className="text-sm font-medium">Producto del recibo</Combobox.Label>
+              {!product && (data?.hasNext || page > 1) && (
+                <MarketPagination page={page} hasNext={data?.hasNext} selectPage={(next) => {
+                  setPage(next)
+                  stockInput.current?.focus()
+                  setPickerOpen(true)
+                }} />
               )}
-              {products.map((item) => <option key={item.id} value={item.id}>{[receiptCode(item.receiptNumber), item.crop, item.variety, item.area, item.unit].filter(Boolean).join(' · ')}</option>)}
-            </select>
-          </label>
-        </div>
-        <p id="market-stock-search-help" role="status" className="text-xs text-muted-foreground">
-          {query ? (data ? `${products.length} coincidencias en esta página. Selecciona el producto del recibo para vender.` : 'Buscando productos con saldo…')
-            : 'El buscador filtra el selector por producto, código de recibo o código de envío.'}
-        </p>
-        <MarketPagination page={page} hasNext={data?.hasNext} selectPage={setPage} />
+            </div>
+            <Combobox.InputGroup className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
+              <Combobox.Input ref={stockInput} maxLength={120} placeholder="Busca por producto, recibo o envío" className={`${marketUi.input} w-full pl-9 pr-20`} />
+              <div className="absolute inset-y-0 right-1 flex items-center">
+                <Combobox.Clear aria-label="Limpiar producto" className="rounded-md p-2 hover:bg-muted"><X className="size-4" aria-hidden /></Combobox.Clear>
+                <Combobox.Trigger aria-label="Mostrar productos con saldo" className="rounded-md p-2 hover:bg-muted"><ChevronDown className="size-4" aria-hidden /></Combobox.Trigger>
+              </div>
+            </Combobox.InputGroup>
+          </div>
+          <Combobox.Portal>
+            <Combobox.Positioner sideOffset={4} className="z-40 w-(--anchor-width)">
+              <Combobox.Popup className="overflow-hidden rounded-xl border border-border bg-background shadow-lg">
+                <Combobox.Empty className="px-3 py-2 text-sm text-muted-foreground empty:hidden">
+                  {stockError ? 'No se pudo consultar el saldo.' : !data || query !== search ? 'Buscando productos…' : 'No hay productos con saldo para esta búsqueda.'}
+                </Combobox.Empty>
+                <Combobox.List className="max-h-[min(16rem,var(--available-height))] overflow-auto empty:hidden">
+                  {(item: StockRow) => (
+                    <Combobox.Item key={item.id} value={item} className="grid cursor-pointer gap-0.5 px-3 py-2 text-sm data-highlighted:bg-muted data-selected:font-semibold">
+                      <span>{stockLabel(item)}</span>
+                      <span className="text-xs text-muted-foreground">{item.shipmentCode} · Saldo de {units(item.available)} {item.unit}</span>
+                    </Combobox.Item>
+                  )}
+                </Combobox.List>
+              </Combobox.Popup>
+            </Combobox.Positioner>
+          </Combobox.Portal>
+        </Combobox.Root>
         {stockError && <MarketError message={stockError.message} retry={() => void reloadStock()} />}
         {selectionError && <MarketError message={selectionError.message} retry={() => void reloadSelection()} />}
-        {data?.rows.length === 0 && !product && <p className="text-xs text-muted-foreground">{query ? 'No se encontraron productos con saldo para esa búsqueda.' : 'Confirma una recepción para registrar ventas de sus productos.'}</p>}
         {product && (
           <div className="grid gap-3">
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
@@ -391,49 +432,6 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
               )}
             </div>
 
-            {/* Guía de precio del mercado real (solo referencia, nunca impone el valor) */}
-            <div className="rounded-xl border border-[#cfe0d2] bg-[#f5faf6] p-3.5 text-sm dark:border-[#2d4537] dark:bg-[#142019]">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2 font-semibold text-[#1f4834] dark:text-[#c9e7d0]">
-                  <Tag className="size-4 shrink-0" aria-hidden />
-                  <span>Referencia del mercado actual ({product.crop} · {product.unit})</span>
-                </div>
-                <Link
-                  href="/agro-market?seccion=precios"
-                  prefetch={false}
-                  className="text-xs font-semibold text-[#2c6048] underline underline-offset-2 dark:text-[#a8d5b3]"
-                >
-                  Actualizar precios
-                </Link>
-              </div>
-              {activeMarketPrice ? (
-                <div className="mt-2 grid gap-1 text-xs sm:text-sm">
-                  <p className="text-foreground">
-                    Precio real del mercado: <strong className="text-base text-emerald-800 dark:text-emerald-300">{usd(activeMarketPrice.priceUsd)}</strong> por {product.unit}
-                    {(activeMarketPrice.minPriceUsd || activeMarketPrice.maxPriceUsd) && (
-                      <span className="ml-1.5 text-xs text-muted-foreground">
-                        (rango {activeMarketPrice.minPriceUsd ? usd(activeMarketPrice.minPriceUsd) : '—'} – {activeMarketPrice.maxPriceUsd ? usd(activeMarketPrice.maxPriceUsd) : '—'})
-                      </span>
-                    )}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {activeMarketPrice.marketName} · {activeMarketPrice.source} · actualizado {formatDate(activeMarketPrice.effectiveDate)}
-                  </p>
-                </div>
-              ) : (
-                <p className="mt-1.5 text-xs text-muted-foreground">
-                  No hay un precio de mercado registrado para <strong>{product.crop}</strong> en <strong>{product.unit}</strong>.
-                  {product.customerUnitPrice && (
-                    <> Referencia anotada en recepción: <strong className="text-foreground">{usd(product.customerUnitPrice)}</strong>.</>
-                  )}
-                </p>
-              )}
-              <p className="mt-1.5 text-xs text-muted-foreground">
-                {retailSuggestion
-                  ? <>Precio sugerido de venta: <strong className="text-foreground">{usd(retailSuggestion.price)}</strong> ({retailSuggestion.reason}). El sistema solo sugiere este valor; ingresa tú el precio final de venta.</>
-                  : 'El sistema no fija el precio: escribe libremente el precio final al cliente.'}
-              </p>
-            </div>
           </div>
         )}
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -452,6 +450,7 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
               onChange={(event) => setPrice(event.target.value)}
               className={marketUi.input}
             />
+            {retailSuggestion && <span className="text-xs font-normal text-muted-foreground">Sugerido {usd(retailSuggestion.price)} · {retailSuggestion.reason}</span>}
           </label>
           <div className="grid gap-1 text-sm font-medium">
             <span>Ganancia sobre costo</span>
@@ -499,7 +498,7 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
               className={marketUi.input}
             >
               <option value="">Selecciona nueva unidad</option>
-              {(priceCatalog?.units ?? [])
+              {unitOptions
                 .filter((u) => u.name.toLowerCase() !== product.unit.toLowerCase())
                 .map((u) => (
                   <option key={u.id} value={u.id}>

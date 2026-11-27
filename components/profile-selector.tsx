@@ -19,11 +19,14 @@ export function ProfileSelector() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const dialogRef = useRef<HTMLDialogElement>(null)
+  const pinRef = useRef<HTMLInputElement>(null)
+  const submitting = useRef(false)
 
   useEffect(() => {
     const dialog = dialogRef.current
     if (!selected || !dialog) return
     dialog.showModal()
+    pinRef.current?.focus()
     return () => dialog.close()
   }, [selected])
 
@@ -35,14 +38,21 @@ export function ProfileSelector() {
     setError('')
   }
 
-  async function submitPin(event: React.FormEvent) {
-    event.preventDefault()
-    if (loading) return
-    if (!selected || pin.length < 4 || pin.length > 64) return setError('Introduce una clave o PIN de al menos 4 caracteres.')
+  function changePin(value: string) {
+    if (submitting.current) return
+    const next = value.slice(0, 4)
+    setPin(next)
+    setError('')
+    if (next.length === 4) void submitPin(next)
+  }
+
+  async function submitPin(value: string) {
+    if (!selected || value.length !== 4 || submitting.current) return
+    submitting.current = true
     setLoading(true)
     setError('')
     try {
-      await productionFetch('/api/profile-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile: selected, pin }) })
+      await productionFetch('/api/profile-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile: selected, pin: value }) })
       window.location.assign(
         selected === 'admin'
           ? '/administracion'
@@ -54,7 +64,10 @@ export function ProfileSelector() {
       )
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : 'No se pudo iniciar sesión.')
+      setPin('')
       setLoading(false)
+      submitting.current = false
+      pinRef.current?.focus()
     }
   }
 
@@ -81,27 +94,30 @@ export function ProfileSelector() {
             <div>
               <div className="flex size-10 items-center justify-center rounded-xl bg-[#e2f0e5] text-[#2c6048]"><selectedProfile.icon /></div>
               <h2 id="pin-title" className="mt-4 text-xl font-semibold">{selectedProfile.title}</h2>
-              <p className="mt-1 text-sm text-muted-foreground">Introduce tu PIN para continuar.</p>
+              <p id="pin-help" className="mt-1 text-sm text-muted-foreground">Ingresa tu PIN de 4 caracteres para iniciar sesión.</p>
             </div>
             <button type="button" aria-label="Cerrar" disabled={loading} onClick={() => setSelected(null)} className="rounded-lg p-2 text-muted-foreground hover:bg-muted disabled:opacity-50"><X /></button>
           </div>
-          <form onSubmit={submitPin} className="mt-6">
+          <form onSubmit={(event) => { event.preventDefault(); void submitPin(pin) }} className="mt-6">
             <label htmlFor="profile-pin" className="text-sm font-medium">PIN de acceso</label>
             <input
               id="profile-pin"
-              autoFocus
+              ref={pinRef}
               required
               type="password"
               autoComplete="one-time-code"
               minLength={4}
-              maxLength={64}
+              maxLength={4}
+              readOnly={loading}
+              aria-describedby={error ? 'pin-help pin-error' : 'pin-help'}
+              aria-invalid={Boolean(error)}
               value={pin}
-              onChange={(event) => setPin(event.target.value)}
+              onChange={(event) => changePin(event.target.value)}
               className="mt-2 w-full rounded-xl border border-input bg-background px-4 py-3 text-center text-2xl tracking-[0.35em] outline-none ring-offset-background focus:ring-2 focus:ring-[#2c6048]"
               placeholder="••••"
             />
-            {error && <p role="alert" className="mt-2 text-center text-sm text-destructive">{error}</p>}
-            <button disabled={loading} className="mt-3 w-full rounded-xl bg-[#2c6048] px-4 py-3 text-sm font-semibold text-white disabled:opacity-60">{loading ? 'Validando…' : 'Continuar'}</button>
+            {error && <p id="pin-error" role="alert" className="mt-2 text-center text-sm text-destructive">{error}</p>}
+            {loading && <p role="status" className="mt-3 text-center text-sm text-muted-foreground">Validando PIN…</p>}
           </form>
         </dialog>
       )}

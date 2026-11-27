@@ -5,8 +5,8 @@
  */
 import type { ReportPayload } from '@/lib/report-generator'
 
-const PAGE_W = 595.28
-const PAGE_H = 841.89
+const PAGE_W = 841.89
+const PAGE_H = 595.28
 const MARGIN_X = 42
 const CONTENT_W = PAGE_W - MARGIN_X * 2
 const TOP_Y = PAGE_H - 46
@@ -260,34 +260,6 @@ export class InstitutionalPdfBuilder {
     this.y -= 4
   }
 
-  addKpiGrid(kpis: { label: string; value: string; detail?: string }[]) {
-    if (kpis.length === 0) return
-    const cols = Math.min(4, Math.max(2, kpis.length))
-    const gap = 8
-    const cardW = (CONTENT_W - gap * (cols - 1)) / cols
-    const cardH = 54
-
-    for (let i = 0; i < kpis.length; i += cols) {
-      this.ensureSpace(cardH + 10)
-      const slice = kpis.slice(i, i + cols)
-      slice.forEach((kpi, idx) => {
-        const x = MARGIN_X + idx * (cardW + gap)
-        this.drawRect(x, this.y - cardH, cardW, cardH, COLORS.white, COLORS.border, 0.7)
-        this.drawRect(x, this.y - 3, cardW, 3, COLORS.brand)
-        const labelLines = wrapText(kpi.label, cardW - 14, 7.5, true).slice(0, 2)
-        this.drawText(labelLines[0], x + 7, this.y - 14, 7.5, true, COLORS.muted)
-        const valText = wrapText(kpi.value, cardW - 14, 11.5, true)[0] ?? kpi.value
-        this.drawText(valText, x + 7, this.y - 31, 11.5, true, COLORS.brandDark)
-        if (kpi.detail) {
-          const det = wrapText(kpi.detail, cardW - 14, 7, false)[0] ?? ''
-          this.drawText(det, x + 7, this.y - 44, 7, false, COLORS.muted)
-        }
-      })
-      this.y -= cardH + 10
-    }
-    this.y -= 4
-  }
-
   addChart(chart: {
     title: string
     unit: string
@@ -393,13 +365,8 @@ export class InstitutionalPdfBuilder {
     rows: Record<string, string | number | null>[]
     emptyMessage?: string
   }) {
-    this.addSectionTitle(table.title, table.subtitle)
-
     if (table.rows.length === 0) {
-      this.ensureSpace(26)
-      this.drawRect(MARGIN_X, this.y - 22, CONTENT_W, 22, COLORS.rowAlt, COLORS.border, 0.5)
-      this.drawText(table.emptyMessage ?? 'Sin registros en este período.', MARGIN_X + 8, this.y - 14, 8.5, false, COLORS.muted)
-      this.y -= 30
+      this.addSectionTitle(table.title, table.emptyMessage ?? 'Sin registros en este período.')
       return
     }
 
@@ -419,49 +386,61 @@ export class InstitutionalPdfBuilder {
       accX += w
     }
 
-    const drawHeader = () => {
-      const h = 20
-      this.drawRect(MARGIN_X, this.y - h, CONTENT_W, h, COLORS.brand)
+    const headerLines = table.columns.map((col, i) => wrapText(col.label, colWidths[i] - 10, 8, true))
+    const headerHeight = Math.max(...headerLines.map((lines) => lines.length)) * 10 + 8
+    const drawHeader = (continued = false) => {
+      this.addSectionTitle(continued ? `${table.title} (continuación)` : table.title, continued ? undefined : table.subtitle)
       table.columns.forEach((col, i) => {
-        const text = wrapText(col.label, colWidths[i] - 8, 8, true)[0] ?? col.label
-        const tw = measureText(text, 8, true)
-        const tx = col.align === 'right' ? colXs[i] + colWidths[i] - tw - 5 : colXs[i] + 5
-        this.drawText(text, tx, this.y - 13, 8, true, COLORS.white)
+        this.drawRect(colXs[i], this.y - headerHeight, colWidths[i], headerHeight, COLORS.brand, COLORS.border, 0.35)
+        headerLines[i].forEach((line, index) => {
+          const tw = measureText(line, 8, true)
+          const tx = col.align === 'right' ? colXs[i] + colWidths[i] - tw - 5 : colXs[i] + 5
+          this.drawText(line, tx, this.y - 12 - index * 10, 8, true, COLORS.white)
+        })
       })
-      this.y -= h
+      this.y -= headerHeight
     }
 
-    this.ensureSpace(44)
+    const wrapRow = (row: (typeof table.rows)[number]) => table.columns.map((col, i) => {
+      const raw = row[col.key]
+      const text = raw === null || raw === undefined || raw === '' ? '—' : String(raw)
+      return wrapText(text, colWidths[i] - 10, 8, false)
+    })
+    const subtitleHeight = table.subtitle ? wrapText(table.subtitle, CONTENT_W, 8.5).length * 11 : 0
+    const firstRow = wrapRow(table.rows[0])
+    const firstRowHeight = Math.max(...firstRow.map((lines) => lines.length)) * 10 + 7
+    const roomOnFreshPage = Math.floor((TOP_Y - 30 - 21 - headerHeight - BOTTOM_Y - 7) / 10)
+    this.ensureSpace(26 + subtitleHeight + headerHeight + Math.min(firstRowHeight, roomOnFreshPage * 10 + 7 - subtitleHeight))
     drawHeader()
 
     table.rows.forEach((row, rowIdx) => {
-      const cellLines = table.columns.map((col, i) => {
-        const raw = row[col.key]
-        const text = raw === null || raw === undefined || raw === '' ? '—' : String(raw)
-        return wrapText(text, colWidths[i] - 10, 8, false).slice(0, 3)
-      })
+      const cellLines = rowIdx === 0 ? firstRow : wrapRow(row)
       const maxLines = Math.max(1, ...cellLines.map((l) => l.length))
-      const rowH = maxLines * 10 + 7
-
-      if (this.y - rowH < BOTTOM_Y) {
+      if (rowIdx > 0 && maxLines <= roomOnFreshPage && this.y - (maxLines * 10 + 7) < BOTTOM_Y) {
         this.startNewPage(false)
-        drawHeader()
+        drawHeader(true)
       }
 
       const bg = rowIdx % 2 === 1 ? COLORS.rowAlt : COLORS.white
-      this.drawRect(MARGIN_X, this.y - rowH, CONTENT_W, rowH, bg, COLORS.border, 0.35)
-
-      table.columns.forEach((col, i) => {
-        const lines = cellLines[i]
-        lines.forEach((line, li) => {
-          const tw = measureText(line, 8, false)
-          const tx = col.align === 'right' ? colXs[i] + colWidths[i] - tw - 5 : colXs[i] + 5
-          const ty = this.y - 11 - li * 10
-          this.drawText(line, tx, ty, 8, false, COLORS.text)
+      let offset = 0
+      while (offset < maxLines) {
+        if (this.y - 17 < BOTTOM_Y) {
+          this.startNewPage(false)
+          drawHeader(true)
+        }
+        const lineCount = Math.min(maxLines - offset, Math.floor((this.y - BOTTOM_Y - 7) / 10))
+        const rowHeight = lineCount * 10 + 7
+        table.columns.forEach((col, i) => {
+          this.drawRect(colXs[i], this.y - rowHeight, colWidths[i], rowHeight, bg, COLORS.border, 0.35)
+          cellLines[i].slice(offset, offset + lineCount).forEach((line, index) => {
+            const tw = measureText(line, 8, false)
+            const tx = col.align === 'right' ? colXs[i] + colWidths[i] - tw - 5 : colXs[i] + 5
+            this.drawText(line, tx, this.y - 11 - index * 10, 8, false, COLORS.text)
+          })
         })
-      })
-
-      this.y -= rowH
+        this.y -= rowHeight
+        offset += lineCount
+      }
     })
 
     this.y -= 12
@@ -604,11 +583,22 @@ export function buildReportPdf(
     filtersLabel: filtersSummary(payload),
   })
 
-  pdf.addSectionTitle('Indicadores principales')
-  pdf.addKpiGrid(payload.kpis)
-
-  for (const chart of payload.charts) {
-    pdf.addChart(chart)
+  pdf.addBulletBox('Observaciones del período', payload.observations, 'info')
+  if (payload.kpis.length > 0) {
+    const deltaFormat = new Intl.NumberFormat('es-EC', { maximumFractionDigits: 1, signDisplay: 'exceptZero' })
+    pdf.addTable({
+      title: 'Indicadores principales',
+      subtitle: payload.period.previousLabel ? `Período de comparación ${payload.period.previousLabel}` : undefined,
+      columns: [
+        { key: 'label', label: 'Indicador' },
+        { key: 'value', label: 'Valor', align: 'right' },
+        { key: 'delta', label: 'Variación', align: 'right' },
+        { key: 'detail', label: 'Detalle' },
+      ],
+      rows: payload.kpis.map(({ label, value, delta, detail }) => ({
+        label, value, delta: delta == null ? null : `${deltaFormat.format(delta)}%`, detail: detail ?? null,
+      })),
+    })
   }
 
   for (const table of payload.tables) {
@@ -663,7 +653,10 @@ export function buildReportPdf(
     }
   }
 
-  pdf.addBulletBox('Observaciones automáticas (análisis descriptivo)', payload.observations, 'info')
+  for (const chart of payload.charts) {
+    pdf.addChart(chart)
+  }
+
   pdf.addBulletBox('Limitaciones y alcance metodológico', payload.limitations, 'warning')
 
   return pdf.build()

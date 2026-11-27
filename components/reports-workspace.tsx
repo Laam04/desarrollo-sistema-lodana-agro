@@ -205,15 +205,19 @@ function ReportsGeneratorSection({ data, onRefresh }: { data: ReportsIndexRespon
     }
   }
 
-  async function downloadPreview(format: 'pdf' | 'csv') {
-    if (!preview || downloading) return
+  const currentPreview = preview?.payload.type === type && preview.payload.period.from === from && preview.payload.period.to === to
+    && preview.payload.cadence === cadence && (preview.payload.filters.cropId ?? '') === cropId
+    && (preview.payload.filters.unitId ?? '') === unitId ? preview : null
+
+  async function downloadReport(format: 'pdf' | 'csv') {
+    if (downloading) return
     setDownloading(format)
     setFeedback(null)
     try {
-      const url = preview.savedId
-        ? `/api/reports/${preview.savedId}/export?format=${format}`
+      const url = currentPreview?.savedId
+        ? `/api/reports/${currentPreview.savedId}/export?format=${format}`
         : '/api/reports/export'
-      const init: RequestInit = preview.savedId
+      const init: RequestInit = currentPreview?.savedId
         ? { method: 'GET' }
         : {
             method: 'POST',
@@ -259,6 +263,7 @@ function ReportsGeneratorSection({ data, onRefresh }: { data: ReportsIndexRespon
               <button
                 key={opt.id}
                 type="button"
+                aria-pressed={type === opt.id}
                 onClick={() => setType(opt.id)}
                 className={`rounded-2xl border p-3.5 text-left transition ${
                   type === opt.id
@@ -309,11 +314,15 @@ function ReportsGeneratorSection({ data, onRefresh }: { data: ReportsIndexRespon
           </div>
 
           <div className="flex flex-wrap gap-2 pt-1">
+            <button type="button" disabled={Boolean(busy || downloading)} onClick={() => void downloadReport('pdf')} className={marketUi.primary}>
+              <FileText className="size-4" aria-hidden />
+              {downloading === 'pdf' ? 'Preparando PDF…' : 'Descargar PDF'}
+            </button>
             <button type="button" disabled={Boolean(busy)} onClick={() => generate(false)} className={marketUi.button}>
               <Eye className="size-4" />
               {busy === 'preview' ? 'Calculando…' : 'Vista previa'}
             </button>
-            <button type="button" disabled={Boolean(busy)} onClick={() => generate(true)} className={marketUi.primary}>
+            <button type="button" disabled={Boolean(busy)} onClick={() => generate(true)} className={marketUi.button}>
               <Save className="size-4" />
               {busy === 'save' ? 'Generando y guardando…' : 'Generar y guardar en historial'}
             </button>
@@ -334,12 +343,12 @@ function ReportsGeneratorSection({ data, onRefresh }: { data: ReportsIndexRespon
         </div>
       </section>
 
-      {preview && (
+      {currentPreview && (
         <ReportPreview
-          payload={preview.payload}
+          payload={currentPreview.payload}
           trigger="MANUAL"
-          onDownloadPdf={() => downloadPreview('pdf')}
-          onDownloadCsv={() => downloadPreview('csv')}
+          onDownloadPdf={() => downloadReport('pdf')}
+          onDownloadCsv={() => downloadReport('csv')}
           downloading={downloading}
         />
       )}
@@ -596,6 +605,7 @@ function ReportsAutomationSection({ data, onRefresh }: { data: ReportsIndexRespo
 
   const isAdmin = data.actor === 'admin'
   const { automation } = data
+  const runStatuses: Record<string, string> = { SUCCESS: 'Completada', RUNNING: 'Iniciada', PARTIAL: 'Completada con errores', FAILED: 'Fallida' }
 
   async function runAutomation(body: Record<string, unknown>, label: string) {
     if (busy) return
@@ -616,7 +626,7 @@ function ReportsAutomationSection({ data, onRefresh }: { data: ReportsIndexRespo
       onRefresh()
       setResultMsg({
         kind: res.failedCount > 0 ? 'error' : 'ok',
-        text: `${label}: ${res.createdCount} creados, ${res.skippedCount} omitidos (sin duplicar), ${res.failedCount} fallidos.`,
+        text: `${label} · ${res.createdCount} creados, ${res.skippedCount} omitidos y ${res.failedCount} fallidos.`,
       })
     } catch (err) {
       setResultMsg({ kind: 'error', text: err instanceof Error ? err.message : 'Error al ejecutar la automatización.' })
@@ -627,6 +637,17 @@ function ReportsAutomationSection({ data, onRefresh }: { data: ReportsIndexRespo
 
   return (
     <div className="grid gap-6">
+      <section className={`${marketUi.panel} flex flex-wrap items-center justify-between gap-3 p-4`}>
+        <div>
+          <h3 className="text-sm font-semibold">Programación de reportes</h3>
+          <p className="mt-1 text-xs text-muted-foreground">Horario diario en Vercel 00:15 (Ecuador). Los reportes generados aparecen en Historial.</p>
+        </div>
+        {isAdmin && (
+          <Link href="/administracion?seccion=configuracion" className={marketUi.button}>
+            <Shield className="size-4" aria-hidden /> Configurar periodicidad
+          </Link>
+        )}
+      </section>
       {resultMsg && (
         <div
           role="status"
@@ -664,7 +685,7 @@ function ReportsAutomationSection({ data, onRefresh }: { data: ReportsIndexRespo
           <div>
             <h3 className="text-base font-semibold">Períodos pendientes de generación automática</h3>
             <p className="mt-0.5 text-xs text-muted-foreground">
-              Si el servidor estuvo apagado durante un cierre semanal o mensual, aquí se detectan y recuperan sin generar duplicados.
+              Recupera cierres semanales o mensuales. Si se excluyen períodos vacíos, se vuelven a revisar en la próxima ejecución.
             </p>
           </div>
           {isAdmin && (
@@ -718,13 +739,15 @@ function ReportsAutomationSection({ data, onRefresh }: { data: ReportsIndexRespo
                 <div className="mt-2 flex flex-wrap gap-2">
                   <input
                     type="month"
+                    max={lastClosedMonth().month}
+                    aria-label="Mes cerrado"
                     value={targetMonth}
                     onChange={(e) => setTargetMonth(e.target.value)}
                     className={`${marketUi.input} flex-1`}
                   />
                   <button
                     type="button"
-                    disabled={busy}
+                    disabled={busy || !targetMonth}
                     onClick={() => runAutomation({ targetMonth }, `Cierre mensual (${targetMonth})`)}
                     className={marketUi.button}
                   >
@@ -738,13 +761,15 @@ function ReportsAutomationSection({ data, onRefresh }: { data: ReportsIndexRespo
                 <div className="mt-2 flex flex-wrap gap-2">
                   <input
                     type="date"
+                    max={lastClosedWeek().to}
+                    aria-label="Fecha de una semana cerrada"
                     value={targetWeekDay}
                     onChange={(e) => setTargetWeekDay(e.target.value)}
                     className={`${marketUi.input} flex-1`}
                   />
                   <button
                     type="button"
-                    disabled={busy}
+                    disabled={busy || !targetWeekDay}
                     onClick={() => runAutomation({ targetWeekDay }, `Cierre semanal (${targetWeekDay})`)}
                     className={marketUi.button}
                   >
@@ -761,11 +786,6 @@ function ReportsAutomationSection({ data, onRefresh }: { data: ReportsIndexRespo
       <section className={marketUi.panel}>
         <div className={`${marketUi.header} flex flex-wrap items-center justify-between gap-2`}>
           <h3 className="text-base font-semibold">Historial de ejecuciones automáticas</h3>
-          {isAdmin && (
-            <Link href="/administracion?seccion=configuracion" className="inline-flex items-center gap-1 text-xs font-semibold text-[#2c6048] hover:underline dark:text-[#a8d5b3]">
-              <Shield className="size-3.5" /> Configurar periodicidad
-            </Link>
-          )}
         </div>
         <div className="overflow-x-auto p-4">
           {automation.recentRuns.length === 0 ? (
@@ -788,7 +808,7 @@ function ReportsAutomationSection({ data, onRefresh }: { data: ReportsIndexRespo
                   <tr key={r.id} className={marketUi.row}>
                     <td className="whitespace-nowrap px-3 py-2 text-xs text-muted-foreground">{dtFmt.format(new Date(r.startedAt))}</td>
                     <td className="px-3 py-2 font-mono text-xs">{r.source}</td>
-                    <td className="px-3 py-2 font-semibold">{r.status}</td>
+                    <td className="px-3 py-2 font-semibold">{runStatuses[r.status] ?? r.status}</td>
                     <td className="px-3 py-2 text-right tabular-nums">{r.checkedPeriods}</td>
                     <td className="px-3 py-2 text-right tabular-nums">{r.createdCount}</td>
                     <td className="px-3 py-2 text-right tabular-nums">{r.skippedCount}</td>

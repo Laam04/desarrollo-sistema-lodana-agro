@@ -96,32 +96,6 @@ export type MarketReceipt = {
 
 export type MarketShipmentDetail = MarketShipment & { receptions: MarketReceipt[] }
 
-export type MarketReferencePriceRow = {
-  id: string
-  cropId: string
-  cropName: string
-  unitId: string
-  unitName: string
-  priceUsd: string
-  minPriceUsd: string | null
-  maxPriceUsd: string | null
-  marketName: string
-  source: string
-  effectiveDate: string
-  notes: string | null
-  updatedBy: string | null
-  updatedAt: string
-}
-
-export type MarketPriceGuide = {
-  priceUsd: string
-  minPriceUsd: string | null
-  maxPriceUsd: string | null
-  marketName: string
-  source: string
-  effectiveDate: string
-}
-
 export type StockRow = {
   id: string
   receiptNumber: number
@@ -137,7 +111,6 @@ export type StockRow = {
   isConverted?: boolean
   productionUnitPrice: string | null
   customerUnitPrice: string | null
-  marketPrice?: MarketPriceGuide | null
   available: string
 }
 
@@ -162,6 +135,7 @@ export type MarketSalesSummary = {
   profit: string | null
   count: number
   missingCost: number
+  comparison: { through: string | null; salesChange: number | null }
   days: { date: string; total: string; count: number }[]
 }
 
@@ -210,54 +184,13 @@ function roundMoney(value: number): string {
   return (Math.round(value * 100) / 100).toFixed(2)
 }
 
-/**
- * Sugerencia orientativa para el envío de Producción -> Agro Market.
- * Prioriza el mínimo del rango de mercado (o 85% del precio de mercado) para dejar margen comercial.
- * Nunca impone el precio: el agricultor siempre decide el valor final.
- */
-export function suggestShipmentPrice(
-  marketPrice: Pick<MarketPriceGuide, 'priceUsd' | 'minPriceUsd'> | null | undefined,
-  harvestEstimatedPrice?: string | number | null,
-): PriceSuggestion | null {
-  const minMarket = positiveAmount(marketPrice?.minPriceUsd)
-  if (minMarket !== null) {
-    return { price: roundMoney(minMarket), reason: 'mínimo del mercado actual' }
-  }
-  const market = positiveAmount(marketPrice?.priceUsd)
-  if (market !== null) {
-    return { price: roundMoney(market * 0.85), reason: '85% del precio de mercado actual' }
-  }
-  const harvest = positiveAmount(harvestEstimatedPrice)
-  if (harvest !== null) {
-    return { price: roundMoney(harvest), reason: 'precio estimado de la cosecha' }
-  }
-  return null
-}
-
-/**
- * Sugerencia orientativa de venta al público en Agro Market.
- * Usa el mayor entre el precio real del mercado (o referencia de recepción) y costo de producción + 15%,
- * para evitar sugerir ventas a pérdida. Nunca impone el precio: Agro Market siempre decide el valor final.
- */
+/** Sugiere el precio anotado en recepción con un mínimo de costo de producción + 15%. */
 export function suggestRetailSalePrice(
-  marketPrice: Pick<MarketPriceGuide, 'priceUsd'> | null | undefined,
   productionUnitPrice?: string | number | null,
   receptionPrice?: string | number | null,
 ): PriceSuggestion | null {
   const prod = positiveAmount(productionUnitPrice)
   const costFloor = prod !== null ? Math.round(prod * 1.15 * 100) / 100 : null
-  const market = positiveAmount(marketPrice?.priceUsd)
-
-  if (market !== null) {
-    if (costFloor !== null && costFloor > market) {
-      return {
-        price: roundMoney(costFloor),
-        reason: 'costo de producción + 15% (protección sobre mercado actual)',
-      }
-    }
-    return { price: roundMoney(market), reason: 'precio real del mercado actual' }
-  }
-
   const reception = positiveAmount(receptionPrice)
   if (reception !== null) {
     if (costFloor !== null && costFloor > reception) {

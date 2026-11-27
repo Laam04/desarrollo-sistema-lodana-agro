@@ -104,8 +104,8 @@ export function AdminAccessPanel() {
 
   async function submitPin() {
     if (!pinModal) return
-    if (newPin.length < 4 || newPin.length > 64) {
-      setPinError('El PIN debe tener entre 4 y 64 caracteres.')
+    if (newPin.length !== 4) {
+      setPinError('El PIN debe tener exactamente 4 caracteres.')
       return
     }
     if (newPin !== confirmPin) {
@@ -433,9 +433,10 @@ export function AdminAccessPanel() {
             El nuevo PIN se almacena con hash criptográfico (scrypt + salt único). Nunca se guarda ni muestra en texto plano.
           </p>
           <label className="grid gap-1">
-            <span className="text-xs font-medium">Nuevo PIN (4 a 64 caracteres)</span>
+            <span className="text-xs font-medium">Nuevo PIN de 4 caracteres</span>
             <input
               type="password"
+              maxLength={4}
               autoComplete="new-password"
               value={newPin}
               onChange={(e) => setNewPin(e.target.value)}
@@ -447,6 +448,7 @@ export function AdminAccessPanel() {
             <span className="text-xs font-medium">Confirmar nuevo PIN</span>
             <input
               type="password"
+              maxLength={4}
               autoComplete="new-password"
               value={confirmPin}
               onChange={(e) => setConfirmPin(e.target.value)}

@@ -82,7 +82,7 @@ export const profileCatalog: Record<Profile, ProfileMetadata> = {
 
 export function envPinForProfile(profile: Profile): string | undefined {
   const configured = process.env[profilePins[profile]]
-  if (configured && isValidPin(configured)) return configured
+  if (configured !== undefined) return isValidPin(configured) ? configured : undefined
   if (process.env.NODE_ENV !== 'production') return localPins[profile]
   return undefined
 }
@@ -272,7 +272,7 @@ export async function updateProfilePin(
   currentAdminJti?: string,
 ) {
   if (newPin !== null && !isValidPin(newPin)) {
-    throw new ProductionError('El PIN debe tener entre 4 y 64 caracteres sin saltos de línea.', 400)
+    throw new ProductionError('El PIN debe tener exactamente 4 caracteres.', 400)
   }
   if (newPin === null && !envPinForProfile(profile)) {
     throw new ProductionError(

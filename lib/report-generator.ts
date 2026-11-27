@@ -197,7 +197,7 @@ async function queryProductionData(from: string, to: string, cropId: string | nu
         unit: { select: { id: true, name: true } },
         productionArea: { select: { name: true, zone: { select: { name: true } } } },
         losses: {
-          where: { deletedAt: null, status: 'ACTIVE', affectsHarvest: true },
+          where: { deletedAt: null, status: 'ACTIVE', affectsHarvest: true, date: { lt: dateEndExclusive } },
           select: { quantity: true },
         },
       },
@@ -443,7 +443,7 @@ async function queryCostsData(from: string, to: string, cropId: string | null) {
 }
 
 async function queryShipmentsReceptionsData(from: string, to: string, cropId: string | null, unitId: string | null) {
-  const { dateStart, dateEndExclusive } = ecuadorDateRangeToUtc(from, to)
+  const { dateStart, dateEndExclusive, ecEndExclusive } = ecuadorDateRangeToUtc(from, to)
 
   const shipments = await prisma.shipment.findMany({
     where: {
@@ -463,24 +463,20 @@ async function queryShipmentsReceptionsData(from: string, to: string, cropId: st
     },
     include: {
       items: {
-        where: {
-          deletedAt: null,
-          ...(cropId ? { cropId } : {}),
-          ...(unitId ? { unitId } : {}),
-        },
+        where: { deletedAt: null },
         include: {
           crop: { select: { name: true } },
           variety: { select: { name: true } },
           unit: { select: { name: true } },
           receptionItems: {
-            where: { deletedAt: null, reception: { deletedAt: null } },
+            where: { deletedAt: null, parentItemId: null, reception: { deletedAt: null, receivedAt: { lt: ecEndExclusive } } },
             select: { receivedQuantity: true },
           },
         },
       },
       receptions: {
-        where: { deletedAt: null },
-        select: { id: true, receiptNumber: true, receivedAt: true, closesWithDifferences: true },
+        where: { deletedAt: null, receivedAt: { lt: ecEndExclusive } },
+        select: { closesWithDifferences: true },
       },
     },
     orderBy: [{ date: 'desc' }, { code: 'desc' }],
@@ -492,22 +488,29 @@ async function queryShipmentsReceptionsData(from: string, to: string, cropId: st
   const attentionRows: { code: string; date: string; status: string; itemsSummary: string; pendingSummary: string }[] = []
 
   for (const s of shipments) {
-    if (s.status === 'CANCELLED') {
+    if (s.status === 'CANCELLED' && s.updatedAt < ecEndExclusive) {
       counts.cancelled += 1
       continue
     }
     counts.total += 1
-    if (s.status === 'IN_TRANSIT' || s.status === 'ACTIVE') counts.pending += 1
-    else if (s.status === 'PARTIALLY_RECEIVED') counts.partial += 1
-    else if (s.status === 'RECEIVED') counts.received += 1
-    else if (s.status === 'RECEIVED_WITH_DIFFERENCES') counts.withDifferences += 1
 
     const itemNotes: string[] = []
     const diffNotes: string[] = []
 
-    for (const item of s.items) {
+    const quantities = s.items.map((item) => ({ item, received: item.receptionItems.reduce((sum, r) => sum.plus(r.receivedQuantity), new Prisma.Decimal(0)) }))
+    const fullyReceived = quantities.length > 0 && quantities.every(({ item, received }) => received.gte(item.quantity))
+    const status = fullyReceived ? 'RECEIVED'
+      : s.receptions.some((r) => r.closesWithDifferences) ? 'RECEIVED_WITH_DIFFERENCES'
+      : s.receptions.length > 0 ? 'PARTIALLY_RECEIVED' : 'IN_TRANSIT'
+    if (status === 'IN_TRANSIT') counts.pending += 1
+    else if (status === 'PARTIALLY_RECEIVED') counts.partial += 1
+    else if (status === 'RECEIVED') counts.received += 1
+    else counts.withDifferences += 1
+
+    for (const { item, received } of quantities) {
+      if ((cropId && item.cropId !== cropId) || (unitId && item.unitId !== unitId)) continue
       const sent = item.quantity.toNumber()
-      const rec = item.receptionItems.reduce((sum, r) => sum + r.receivedQuantity.toNumber(), 0)
+      const rec = received.toNumber()
       const diff = Math.max(0, round2(sent - rec))
       const unit = item.unit.name
       const crop = item.crop.name
@@ -529,11 +532,11 @@ async function queryShipmentsReceptionsData(from: string, to: string, cropId: st
       if (diff > 0) diffNotes.push(`${crop}: ${fmtNum(diff, unit)}`)
     }
 
-    if (s.status !== 'RECEIVED') {
+    if (status !== 'RECEIVED') {
       attentionRows.push({
         code: s.code,
         date: s.date.toISOString().slice(0, 10),
-        status: shipmentStatusLabels[s.status] ?? s.status,
+        status: shipmentStatusLabels[status],
         itemsSummary: itemNotes.join(' · '),
         pendingSummary: diffNotes.length ? diffNotes.join(' · ') : 'Sin saldo pendiente',
       })
@@ -560,8 +563,8 @@ async function queryMarketSalesData(from: string, to: string, cropId: string | n
       shipmentItem: {
         deletedAt: null,
         ...(cropId ? { cropId } : {}),
-        ...(unitId ? { unitId } : {}),
       },
+      ...(unitId ? { OR: [{ saleUnitId: unitId }, { saleUnitId: null, shipmentItem: { unitId } }] } : {}),
     },
   }
 
@@ -887,7 +890,7 @@ export async function buildReportPayload(params: {
     const [currCosts, prevCosts, currProd] = await Promise.all([
       queryCostsData(params.from, params.to, filters.cropId),
       prev.comparable ? queryCostsData(prev.from, prev.to, filters.cropId) : null,
-      queryProductionData(params.from, params.to, filters.cropId, filters.unitId),
+      queryProductionData(params.from, params.to, filters.cropId, null),
     ])
 
     const deltaTotal = prev.comparable ? safePercentChange(currCosts.totalUsd, prevCosts?.totalUsd ?? null) : null
@@ -901,7 +904,7 @@ export async function buildReportPayload(params: {
     // Indicador económico válido: costo directo por unidad útil por (cultivo, unidad)
     const costByCropName = new Map(currCosts.byCrop.map((c) => [c.crop, c.amountUsd]))
     const unitCostRows = currProd.byCropUnit
-      .filter((cu) => cu.useful > 0 && (costByCropName.get(cu.crop) ?? 0) > 0)
+      .filter((cu) => cu.useful > 0 && (costByCropName.get(cu.crop) ?? 0) > 0 && (!filters.unitName || cu.unit === filters.unitName))
       .map((cu) => {
         const directCost = costByCropName.get(cu.crop)!
         // Solo si el cultivo se mide en una única unidad en este período para no asignar el mismo costo a 2 unidades
@@ -1029,7 +1032,7 @@ export async function buildReportPayload(params: {
     const tables: ReportTable[] = [
       {
         title: 'Balance de despachos y recepciones por unidad',
-        subtitle: 'Despachado y recibido se comparan exclusivamente dentro de cada unidad.',
+        subtitle: 'Incluye los despachos del período y sus recepciones confirmadas hasta la fecha final, por unidad de origen.',
         columns: [
           { key: 'unit', label: 'Unidad' },
           { key: 'shipped', label: 'Despachado', align: 'right' },
@@ -1073,7 +1076,7 @@ export async function buildReportPayload(params: {
           { key: 'itemsSummary', label: 'Enviado' },
           { key: 'pendingSummary', label: 'Saldo / Diferencia' },
         ],
-        rows: data.attentionRows.slice(0, 30),
+        rows: data.attentionRows,
         emptyMessage: 'Todos los despachos activos del período fueron recibidos completos.',
       },
     ]
@@ -1156,14 +1159,16 @@ export async function buildReportPayload(params: {
           { key: 'quantity', label: 'Cantidad', align: 'right' },
           { key: 'totalUsd', label: 'Total vendido', align: 'right' },
           { key: 'grossProfitUsd', label: 'Ganancia bruta est.', align: 'right' },
+          { key: 'costCoverage', label: 'Ventas con costo', align: 'right' },
         ],
-        rows: curr.byProduct.slice(0, 30).map((p) => ({
+        rows: curr.byProduct.map((p) => ({
           product: p.product,
           unit: p.unit,
           count: p.count,
           quantity: fmtNum(p.quantity),
           totalUsd: fmtUsd(p.totalUsd),
           grossProfitUsd: fmtUsd(p.grossProfitUsd),
+          costCoverage: `${p.costCoveredCount} de ${p.count}`,
         })),
         emptyMessage: 'Sin ventas por producto en este período.',
       },
@@ -1212,13 +1217,16 @@ export async function buildReportPayload(params: {
   let seasonalityOut: ReportPayload['seasonality'] = []
   let forecastsOut: ReportPayload['forecasts'] = []
   let analyticsInsightInput: Parameters<typeof buildDeterministicInsights>[0]['analyticsSeries'] = undefined
+  let analyticsLimitation: string | null = null
 
   if (params.type === 'CONSOLIDATED_IMPACT') {
     const fromMonth = params.from.slice(0, 7)
     const toMonth = params.to.slice(0, 7)
+    const { ecEndExclusive } = ecuadorDateRangeToUtc(params.from, params.to)
+    const analysisCutoff = new Date(Math.min(now.getTime(), ecEndExclusive.getTime()))
     try {
       const syntheticReq = new Request(`http://localhost/api/production-summary?from=${fromMonth}&to=${toMonth}`)
-      const analytics = await productionAnalytics(syntheticReq, false)
+      const analytics = await productionAnalytics(syntheticReq, false, analysisCutoff)
       const filteredSeries = analytics.series.filter((s) =>
         (!filters.cropName || s.crop === filters.cropName) &&
         (!filters.unitName || s.unit === filters.unitName),
@@ -1252,9 +1260,9 @@ export async function buildReportPayload(params: {
         consecutiveMonths: s.forecast.consecutiveMonths,
         forecastTrend: s.forecast.trend,
       }))
-    } catch {
-      // Si el rango excede 60 meses o no aplica al resumen mensual, se omite previsión/estacionalidad con nota explícita.
-      analyticsInsightInput = []
+    } catch (error) {
+      if (!(error instanceof ProductionError)) throw error
+      analyticsLimitation = 'La estacionalidad y las previsiones requieren un rango válido de hasta 60 meses dentro del historial disponible.'
     }
   }
 
@@ -1446,7 +1454,7 @@ export async function buildReportPayload(params: {
       ? { seasonality: seasonalityOut, forecasts: forecastsOut }
       : {}),
     observations: insights.observations,
-    limitations: insights.limitations,
+    limitations: analyticsLimitation ? [...insights.limitations, analyticsLimitation] : insights.limitations,
   }
 }
 

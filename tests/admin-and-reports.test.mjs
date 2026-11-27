@@ -16,8 +16,9 @@ import { hashPin, isValidPin, verifyPinHash } from '../lib/pin-crypto.ts'
 
 test('hashPin y verifyPinHash protegen credenciales con scrypt y salt único', () => {
   assert.equal(isValidPin('123'), false)
-  assert.equal(isValidPin('1234\n'), false)
-  assert.equal(isValidPin('482910'), true)
+  assert.equal(isValidPin('123\n'), false)
+  assert.equal(isValidPin('482910'), false)
+  assert.equal(isValidPin('4829'), true)
 
   const h1 = hashPin('482910')
   const h2 = hashPin('482910')
@@ -119,6 +120,7 @@ test('safePercentChange nunca divide entre cero y observaciones respetan reglas 
         unclassifiedLosses: 0,
         harvestCount: 4,
         previousHarvested: 400,
+        previousLosses: 50,
       },
       {
         unit: 'racimos',
@@ -138,6 +140,7 @@ test('safePercentChange nunca divide entre cero y observaciones respetan reglas 
       cancelledCount: 1,
       grossProfitUsd: 180,
       missingCostCount: 2,
+      previousTotalSalesUsd: 625,
       byUnit: [{ unit: 'kilogramos', quantity: 200, totalUsd: 650 }],
     },
   })
@@ -145,6 +148,8 @@ test('safePercentChange nunca divide entre cero y observaciones respetan reglas 
   assert.ok(multiUnit.limitations.some((l) => l.includes('no equivale a utilidad neta')))
   assert.ok(multiUnit.limitations.some((l) => l.includes('2 ventas del período no cuentan con precio')))
   assert.ok(multiUnit.observations.some((o) => o.includes('no permite atribuir causas')))
+  assert.match(multiUnit.observations[0], /^4% más en ventas/)
+  assert.match(multiUnit.observations[1], /^20% menos de mermas/)
 })
 
 test('exportación PDF multipágina y CSV protegen fórmulas e incluyen identificación institucional', () => {
@@ -176,7 +181,7 @@ test('exportación PDF multipágina y CSV protegen fórmulas e incluyen identifi
     kpis: [
       { label: 'Cosechas registradas', value: '24', detail: '2 unidades' },
       { label: 'Costos totales', value: '$1.250,00', detail: 'Producción' },
-      { label: 'Ventas Agro Market', value: '$2.410,50', detail: 'Ganancia bruta est.: $520,00' },
+      { label: 'Ventas Agro Market', value: '$2.410,50', detail: 'Ganancia bruta est.: $520,00', delta: -7.5 },
     ],
     charts: [
       {
@@ -200,7 +205,7 @@ test('exportación PDF multipágina y CSV protegen fórmulas e incluyen identifi
         ],
         // 45 filas fuerzan distribución en múltiples páginas
         rows: Array.from({ length: 45 }, (_, i) => ({
-          crop: i === 0 ? '=SUM(A1:A2) Maíz' : `Cultivo ${i + 1} · Caña y Piña`,
+          crop: i === 0 ? '=SUM(A1:A2) Maíz' : i === 1 ? `${'Descripción de producto extensa '.repeat(200)} fin-de-celda` : `Cultivo ${i + 1} · Caña y Piña`,
           unit: 'kilogramos',
           qty: `${100 + i},50`,
         })),
@@ -217,6 +222,9 @@ test('exportación PDF multipágina y CSV protegen fórmulas e incluyen identifi
   assert.ok(pdfText.includes('/BaseFont /Helvetica'))
   assert.ok(pdfText.includes('/Encoding /WinAnsiEncoding'))
   assert.ok(pdfText.includes('Lodana Agro'))
+  assert.ok(pdfText.includes('/MediaBox [0 0 841.89 595.28]'))
+  assert.ok(pdfText.includes('fin-de-celda'))
+  assert.ok(pdfText.includes('(-7,5%)'))
   // Verifica que generó múltiples páginas
   const pageCountMatch = /\/Count (\d+)/.exec(pdfText)
   assert.ok(pageCountMatch && Number(pageCountMatch[1]) >= 2, 'El PDF extenso debe distribuirse en múltiples páginas')

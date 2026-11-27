@@ -12,7 +12,7 @@
  *       node scripts/run-report-automation.mjs --week=2026-11-16
  *
  * Requiere que la aplicación esté corriendo (APP_ORIGIN) o se puede invocar
- * directamente contra el endpoint seguro /api/cron/reports usando LODANA_CRON_SECRET.
+ * directamente contra el endpoint seguro /api/cron/reports usando CRON_SECRET.
  */
 
 try {
@@ -27,10 +27,10 @@ function argValue(prefix) {
 }
 
 const origin = (argValue('--origin=') || process.env.APP_ORIGIN || 'http://localhost:3000').replace(/\/$/, '')
-const secret = process.env.LODANA_CRON_SECRET?.trim()
+const secret = process.env.CRON_SECRET?.trim() || process.env.LODANA_CRON_SECRET?.trim()
 
 if (!secret || secret.length < 32) {
-  console.error('Error: configura LODANA_CRON_SECRET (mínimo 32 caracteres) en .env o en las variables de entorno.')
+  console.error('Configura CRON_SECRET con un mínimo de 32 caracteres en .env o en las variables de entorno.')
   process.exit(1)
 }
 
@@ -56,7 +56,7 @@ try {
 
   const data = await response.json().catch(() => null)
   if (!response.ok) {
-    console.error(`Fallo HTTP ${response.status}:`, data?.error ?? 'Sin detalle')
+    console.error(`Fallo HTTP ${response.status}:`, data?.error ?? data ?? 'Sin detalle')
     process.exit(1)
   }
 

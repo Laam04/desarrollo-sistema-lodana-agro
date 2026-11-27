@@ -3,9 +3,9 @@
 import { useDeferredValue, useRef, useState, type FormEvent } from 'react'
 import useSWR from 'swr'
 import Link from 'next/link'
-import { ArrowLeftRight, ClipboardCheck, Image as ImageIcon, Inbox, PackageCheck, Search, Tag, Truck } from 'lucide-react'
+import { ArrowLeftRight, ClipboardCheck, Image as ImageIcon, Inbox, PackageCheck, Search, Truck } from 'lucide-react'
 import { ApiError, createRequestId, formatDate, formatTimestampDate, invalidateProduction, productionFetch } from '@/lib/production-client'
-import { cents, decimalInput, farmSupplier, formatMarkup, markupPercent, receiptCode, suggestRetailSalePrice, units, usd, type MarketReferencePriceRow, type MarketShipment, type MarketShipmentDetail, type PageResult } from '@/lib/market-data'
+import { cents, decimalInput, farmSupplier, formatMarkup, markupPercent, receiptCode, suggestRetailSalePrice, units, usd, type MarketShipment, type MarketShipmentDetail, type PageResult } from '@/lib/market-data'
 import { receivableStatuses, shipmentStatusLabels } from '@/lib/shipment-status'
 import { MarketDialog, MarketError, MarketPagination, marketUi } from '@/components/market-ui'
 import { ReceiptPhotoModal } from '@/components/receipt-photo-field'
@@ -61,7 +61,7 @@ export function MarketReceptions({ historical }: { historical: boolean }) {
   function received(number: number) {
     setNotice(`Recibo ${receiptCode(number)} registrado. Las cantidades recibidas quedaron disponibles para ventas.`)
     if (page > 1 && data?.rows.length === 1) setPage(1)
-    void invalidateProduction('/api/receptions', '/api/market-sales', '/api/shipments', '/api/production-summary')
+    void invalidateProduction('/api/receptions', '/api/market-sales', '/api/shipments', '/api/production-summary', '/api/units')
   }
 
   return (
@@ -185,13 +185,9 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
   const [retryError, setRetryError] = useState('')
   const [photoOpen, setPhotoOpen] = useState(false)
   const replay = useRef<{ draft: string; id: string } | null>(null)
-  const { data: priceCatalog } = useSWR<{ rows: MarketReferencePriceRow[]; units: { id: string; name: string }[] }>(
-    '/api/market-prices',
+  const { data: unitOptions = [] } = useSWR<{ id: string; name: string }[]>(
+    canReceive ? '/api/units' : null,
     productionFetch,
-  )
-  const unitOptions = priceCatalog?.units ?? []
-  const marketPriceByKey = new Map(
-    (priceCatalog?.rows ?? []).map((row) => [`${row.cropId}|${row.unitId}`, row]),
   )
 
   function line(id: string): DraftLine {
@@ -348,14 +344,6 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
             <tbody>
               {shipment.items.map((item) => {
                 const draft = line(item.id)
-                const effectiveUnitId =
-                  draft.convertUnit && draft.saleUnitId && draft.saleUnitId !== '__custom__'
-                    ? draft.saleUnitId
-                    : item.unit.id
-                const marketRef =
-                  item.crop.id && effectiveUnitId
-                    ? marketPriceByKey.get(`${item.crop.id}|${effectiveUnitId}`) ?? null
-                    : null
                 const proportionalCost =
                   draft.convertUnit &&
                   item.estimatedUnitPrice &&
@@ -364,9 +352,7 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
                     ? (Number(item.estimatedUnitPrice) * Number(draft.quantity)) / Number(draft.saleQuantity)
                     : null
                 const retailSuggestion = suggestRetailSalePrice(
-                  marketRef,
                   proportionalCost !== null ? proportionalCost.toFixed(2) : item.estimatedUnitPrice,
-                  null,
                 )
 
                 return (
@@ -374,12 +360,6 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
                   <th scope="row" className="min-w-34 px-3 py-3 text-left align-top">
                     <span className="font-semibold">{item.crop.name}</span>
                     <span className="block text-xs font-normal text-muted-foreground">{[item.variety?.name, item.productionArea?.name].filter(Boolean).join(' · ')}</span>
-                    {marketRef && (
-                      <span className="mt-1 inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200">
-                        <Tag className="size-3" aria-hidden />
-                        Mercado: {usd(marketRef.priceUsd)}/{marketRef.unitName}
-                      </span>
-                    )}
                     {item.notes && <span className="block break-words text-xs font-normal text-muted-foreground">{item.notes}</span>}
                   </th>
                   <td className="px-3 py-3 align-top">{item.unit.name}</td>

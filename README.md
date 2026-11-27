@@ -21,8 +21,8 @@ Sistema web desarrollado como proyecto de titulación de la carrera de Ingenier�
    - `DATABASE_URL` y `DIRECT_URL` (PostgreSQL 16 local en puerto `5433` o Neon serverless).
    - `LODANA_SESSION_SECRET` (mínimo 32 caracteres aleatorios).
    - `APP_ORIGIN` (`http://localhost:3000` en local; origen HTTPS canónico en producción).
-   - `LODANA_PIN_PRODUCTION`, `LODANA_PIN_RECEPTION`, `LODANA_PIN_QUERIES`, `LODANA_PIN_ADMIN`.
-   - `LODANA_CRON_SECRET` (secreto Bearer mínimo 32 caracteres para `/api/cron/reports`).
+   - `LODANA_PIN_PRODUCTION`, `LODANA_PIN_RECEPTION`, `LODANA_PIN_QUERIES`, `LODANA_PIN_ADMIN` (exactamente 4 caracteres).
+   - `CRON_SECRET` (secreto Bearer mínimo 32 caracteres para `/api/cron/reports`). El nombre anterior `LODANA_CRON_SECRET` sigue disponible para instalaciones existentes.
 2. **Base de datos local de pruebas**:
    ```bash
    npm run db:test:start
@@ -36,6 +36,10 @@ Sistema web desarrollado como proyecto de titulación de la carrera de Ingenier�
    Disponible en `http://localhost:3000`.
 
 ## Nuevos modelos de datos (migración `20261124000000_admin_and_reports`)
+
+Antes de actualizar una instalación existente, cambia en **Administración → Accesos** los PIN de más de 4 caracteres guardados en la base de datos. Ajusta también cualquier PIN de entorno más largo. Los PIN existentes de cuatro caracteres se pueden seguir usando.
+
+La migración `20261127130000_archive_market_reference_prices` conserva las referencias históricas de precios y las desvincula de los catálogos activos.
 
 - `ProfileAccessConfig`: estado de habilitación y hash `scrypt` opcional del PIN por perfil (mantiene compatibilidad con los PINs de entorno cuando `pinHash` es `null`). Nunca se permite deshabilitar `admin`.
 - `SystemSetting`: configuración persistente tipada (`institution` para encabezados institucionales y `reporting` para periodicidad y ventanas de recuperación).
@@ -64,7 +68,7 @@ Sistema web desarrollado como proyecto de titulación de la carrera de Ingenier�
 | `GET /api/reports/[id]/export?format=pdf\|csv` | `queries`, `admin` | Descarga en PDF institucional o CSV UTF-8 protegido contra inyección de fórmulas. |
 | `POST /api/reports/export` | `queries`, `admin` | Exporta directamente a PDF o CSV desde parámetros de vista previa. |
 | `POST /api/reports/automation` | `admin` | Ejecuta recuperación de períodos pendientes o un cierre específico (`targetMonth` o `targetWeekDay`). |
-| `GET / POST /api/cron/reports` | `Bearer LODANA_CRON_SECRET` | Endpoint externo idempotente para cron jobs; soporta `?asOf=AAAA-MM-DD`, `?targetMonth=AAAA-MM`, `?targetWeekDay=AAAA-MM-DD`. |
+| `GET / POST /api/cron/reports` | `Bearer CRON_SECRET` | Endpoint externo idempotente para cron jobs. Admite `?asOf=AAAA-MM-DD`, `?targetMonth=AAAA-MM` y `?targetWeekDay=AAAA-MM-DD`. |
 
 ## Configuración de reportes automáticos
 
@@ -72,6 +76,7 @@ Los reportes automáticos operan en la zona horaria **`America/Guayaquil`**:
 - **Semanal operativo (`WEEKLY_OPERATIONAL`)**: períodos cerrados de lunes a domingo.
 - **Mensual consolidado (`CONSOLIDATED_IMPACT`)**: meses calendario cerrados.
 - **Recuperación tras apagado**: cada ejecución evalúa las últimas `maxBackfillWeeks` semanas cerradas y `maxBackfillMonths` meses cerrados configurados en Administración → Configuración, generando solo los faltantes o reintentando los fallidos, sin crear duplicados gracias a `dedupeKey`.
+- Los reportes generados están disponibles en **Reportes → Historial**. Cada PDF presenta las tablas del informe seleccionado como una planilla A4 horizontal con encabezados repetidos y columnas numéricas alineadas. El CSV se puede abrir en Excel.
 
 ### Ejecución local (Windows Task Scheduler o cron)
 ```bash
@@ -93,7 +98,7 @@ node scripts/run-report-automation.mjs --week=2026-11-16
 También puedes ejecutar estos cierres desde **Reportes → Automatización** con perfil `admin`.
 
 ### Producción (Vercel / cron externo)
-El repositorio incluye `vercel.json` configurado para invocar `/api/cron/reports` diariamente a las `05:15 UTC` (`00:15` Ecuador). Configura `LODANA_CRON_SECRET` en las variables de entorno del despliegue (o utiliza un cron externo / GitHub Actions enviando `Authorization: Bearer <LODANA_CRON_SECRET>`).
+El repositorio incluye `vercel.json` configurado para invocar `/api/cron/reports` diariamente a las `05:15 UTC` (`00:15` Ecuador). Configura `CRON_SECRET` en las variables de entorno de producción de Vercel para que el programador lo envíe automáticamente. Si usas otro programador, envía `Authorization: Bearer <CRON_SECRET>`.
 
 ## Verificación y pruebas
 

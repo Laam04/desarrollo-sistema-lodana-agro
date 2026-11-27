@@ -6,11 +6,13 @@ import {
   buildAutomaticDedupeKey,
   closedMonthsInLookback,
   closedWeeksInLookback,
+  ecuadorToday,
   isValidMonthKey,
   monthBoundaries,
   formatPeriodLabel,
 } from '@/lib/report-periods'
 import { isValidIsoDay, marketWeek } from '@/lib/market-data'
+import { ProductionError } from '@/lib/production-api'
 
 export type ScheduledPeriodCandidate = {
   dedupeKey: string
@@ -112,6 +114,7 @@ export async function runScheduledReports(options: {
 }): Promise<AutomationRunResult> {
   const now = options.now ?? new Date()
   const cfg = await getReportingConfig()
+  if (options.targetMonth && options.targetWeekDay) throw new ProductionError('Selecciona un cierre semanal o mensual por ejecución.')
 
   let candidates: ScheduledPeriodCandidate[] = []
 
@@ -142,11 +145,14 @@ export async function runScheduledReports(options: {
     const discovery = await getPendingScheduledPeriods(now)
     candidates = discovery.candidates
   }
+  if (candidates.some((candidate) => candidate.to >= ecuadorToday(now) || candidate.to >= ecuadorToday())) {
+    throw new ProductionError('Selecciona un período que ya haya cerrado en Ecuador.')
+  }
 
   const run = await prisma.reportAutomationRun.create({
     data: {
       source: options.source,
-      status: 'SUCCESS',
+      status: 'RUNNING',
       checkedPeriods: candidates.length,
     },
   })
@@ -159,7 +165,7 @@ export async function runScheduledReports(options: {
   for (const candidate of candidates) {
     const existing = await prisma.generatedReport.findUnique({
       where: { dedupeKey: candidate.dedupeKey },
-      select: { id: true, status: true, attempts: true },
+      select: { id: true, status: true },
     })
 
     if (existing && existing.status === 'READY') {
@@ -198,8 +204,8 @@ export async function runScheduledReports(options: {
 
       let savedId: string
       if (existing) {
-        const updated = await prisma.generatedReport.update({
-          where: { id: existing.id },
+        const updated = await prisma.generatedReport.updateMany({
+          where: { id: existing.id, status: 'FAILED' },
           data: {
             status: 'READY',
             title: REPORT_TYPE_META[candidate.type].label,
@@ -207,13 +213,17 @@ export async function runScheduledReports(options: {
             summaryJson: summary as unknown as Prisma.InputJsonValue,
             payloadJson: payload as unknown as Prisma.InputJsonValue,
             errorMessage: null,
-            attempts: existing.attempts + 1,
+            attempts: { increment: 1 },
             generatedBy: options.actor,
             generatedAt: now,
           },
-          select: { id: true },
         })
-        savedId = updated.id
+        if (updated.count === 0) {
+          skippedCount += 1
+          items.push({ dedupeKey: candidate.dedupeKey, type: candidate.type, periodLabel: candidate.label, outcome: 'SKIPPED_DUPLICATE', reportId: existing.id })
+          continue
+        }
+        savedId = existing.id
       } else {
         try {
           const created = await prisma.generatedReport.create({
@@ -264,12 +274,12 @@ export async function runScheduledReports(options: {
       failedCount += 1
       const message = error instanceof Error ? error.message : 'Error desconocido al generar el reporte.'
       if (existing) {
-        await prisma.generatedReport.update({
-          where: { id: existing.id },
+        await prisma.generatedReport.updateMany({
+          where: { id: existing.id, status: 'FAILED' },
           data: {
             status: 'FAILED',
             errorMessage: message.slice(0, 500),
-            attempts: existing.attempts + 1,
+            attempts: { increment: 1 },
             generatedBy: options.actor,
           },
         }).catch(() => {})
@@ -351,7 +361,7 @@ export async function runScheduledReports(options: {
 
 export async function retryFailedReport(reportId: string, actor: string) {
   const existing = await prisma.generatedReport.findUnique({ where: { id: reportId } })
-  if (!existing) return null
+  if (!existing || existing.status !== 'FAILED') return existing
 
   const filters = (existing.filtersJson as { cropId?: string | null; unitId?: string | null } | null) ?? {}
   const now = new Date()
@@ -367,29 +377,29 @@ export async function retryFailedReport(reportId: string, actor: string) {
       now,
     })
 
-    const updated = await prisma.generatedReport.update({
-      where: { id: existing.id },
+    await prisma.generatedReport.updateMany({
+      where: { id: existing.id, status: 'FAILED' },
       data: {
         status: 'READY',
         periodLabel: payload.period.label,
         summaryJson: extractReportSummary(payload) as unknown as Prisma.InputJsonValue,
         payloadJson: payload as unknown as Prisma.InputJsonValue,
         errorMessage: null,
-        attempts: existing.attempts + 1,
+        attempts: { increment: 1 },
         generatedBy: actor,
         generatedAt: now,
       },
     })
-    return updated
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Error al reintentar el reporte.'
-    return prisma.generatedReport.update({
-      where: { id: existing.id },
+    await prisma.generatedReport.updateMany({
+      where: { id: existing.id, status: 'FAILED' },
       data: {
         status: 'FAILED',
         errorMessage: message.slice(0, 500),
-        attempts: existing.attempts + 1,
+        attempts: { increment: 1 },
       },
     })
   }
+  return prisma.generatedReport.findUnique({ where: { id: existing.id } })
 }

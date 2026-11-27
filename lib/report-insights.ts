@@ -111,6 +111,20 @@ export function buildDeterministicInsights(input: {
   const limitations: string[] = []
 
   const units = input.productionByUnit ?? []
+  if (input.comparable) {
+    const salesChange = safePercentChange(input.market?.totalSalesUsd ?? null, input.market?.previousTotalSalesUsd ?? null)
+    if (salesChange !== null) {
+      observations.push(salesChange === 0
+        ? 'El monto vendido en Agro Market se mantuvo frente al período anterior.'
+        : `${numFmt.format(Math.abs(salesChange))}% ${salesChange > 0 ? 'más' : 'menos'} en ventas de Agro Market frente al período anterior.`)
+    }
+    for (const unit of units) {
+      const lossChange = safePercentChange(unit.losses, unit.previousLosses ?? null)
+      if (lossChange !== null && lossChange !== 0) {
+        observations.push(`${numFmt.format(Math.abs(lossChange))}% ${lossChange > 0 ? 'más' : 'menos'} de mermas registradas en ${unit.unit} frente al período anterior.`)
+      }
+    }
+  }
   if (input.productionByUnit) {
     if (units.length === 0) {
       observations.push(`No se registraron cosechas ni mermas activas durante ${input.periodLabel}.`)
@@ -122,12 +136,15 @@ export function buildDeterministicInsights(input: {
       }
 
       for (const u of units) {
-        const lossRatio = u.harvested > 0 ? Math.round((u.affectingLosses / u.harvested) * 1000) / 10 : null
+        const lossRatio = u.harvested > 0 ? Math.round(((u.harvested - u.useful) / u.harvested) * 1000) / 10 : null
         const baseText = `En ${u.unit}, se registraron ${numFmt.format(u.harvested)} ${u.unit} cosechados (${u.harvestCount} cosechas) y ${numFmt.format(u.useful)} ${u.unit} de producción útil`
         const lossText = u.losses > 0
-          ? `, junto con ${numFmt.format(u.losses)} ${u.unit} en mermas registradas${lossRatio !== null ? ` (${numFmt.format(lossRatio)}% descontado de la cosecha de origen)` : ''}.`
+          ? `, junto con ${numFmt.format(u.losses)} ${u.unit} en mermas registradas.`
           : ', sin mermas registradas en el período.'
         observations.push(baseText + lossText)
+        if (lossRatio !== null && lossRatio > 0) {
+          observations.push(`Las mermas aplicables descontaron el ${numFmt.format(lossRatio)}% de la producción cosechada en ${u.unit} durante el período.`)
+        }
 
         if (u.unclassifiedLosses > 0) {
           limitations.push(
@@ -246,14 +263,6 @@ export function buildDeterministicInsights(input: {
           `El producto con mayor facturación en Agro Market fue ${m.topProduct.label} (${usdFmt.format(m.topProduct.totalUsd)}).`,
         )
       }
-      if (input.comparable && m.previousTotalSalesUsd !== undefined) {
-        const pct = safePercentChange(m.totalSalesUsd, m.previousTotalSalesUsd)
-        if (pct !== null) {
-          observations.push(
-            `El monto vendido en Agro Market varió en ${formatPct(pct)} respecto al período anterior comparable (${usdFmt.format(m.previousTotalSalesUsd ?? 0)}).`,
-          )
-        }
-      }
       limitations.push(
         'La ganancia bruta estimada utiliza el precio de referencia de Producción como costo base y no equivale a utilidad neta ni descuenta gastos operativos de comercialización.',
       )
@@ -265,7 +274,7 @@ export function buildDeterministicInsights(input: {
     }
   }
 
-  if (input.analyticsSeries && input.analyticsSeries.length > 0) {
+  if (input.analyticsSeries) {
     const withSeasonality = input.analyticsSeries.filter((s) => s.completeYears >= 2 && (s.higherMonths.length > 0 || s.lowerMonths.length > 0))
     const withForecast = input.analyticsSeries.filter((s) => s.forecastAvailable)
 

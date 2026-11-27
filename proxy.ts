@@ -11,7 +11,6 @@ function deny(message: string, status: number) {
 const routeAcl: readonly { prefix: string; roles: readonly Profile[] }[] = [
   { prefix: '/api/receptions', roles: ['reception', 'admin'] },
   { prefix: '/api/market-sales', roles: ['reception', 'admin'] },
-  { prefix: '/api/market-prices', roles: ['reception', 'production', 'admin'] },
   { prefix: '/agro-market', roles: ['reception', 'admin'] },
   { prefix: '/administracion', roles: ['admin'] },
   { prefix: '/api/admin', roles: ['admin'] },
@@ -24,7 +23,7 @@ const routeAcl: readonly { prefix: string; roles: readonly Profile[] }[] = [
   { prefix: '/api/losses', roles: ['production', 'admin'] },
   { prefix: '/api/production-areas', roles: ['production', 'admin'] },
   { prefix: '/api/zones', roles: ['production', 'admin'] },
-  { prefix: '/api/units', roles: ['production', 'admin'] },
+  { prefix: '/api/units', roles: ['production', 'reception', 'admin'] },
   { prefix: '/api/costs', roles: ['production', 'admin'] },
   { prefix: '/api/cost-categories', roles: ['production', 'admin'] },
   { prefix: '/api/shipments', roles: ['production', 'admin'] },

@@ -33,7 +33,6 @@ model Crop {
   harvests             Harvest[]
   shipmentItems        ShipmentItem[]
   costAllocations      CostAllocation[]
-  marketReferencePrices MarketReferencePrice[]
 
   @@index([active, createdAt])
   @@index([unitId])
@@ -101,7 +100,6 @@ model Unit {
   harvests              Harvest[]
   shipmentItems         ShipmentItem[]
   saleReceptionItems    ReceptionItem[]        @relation("ReceptionItemSaleUnit")
-  marketReferencePrices MarketReferencePrice[]
 
   @@index([active])
 }
@@ -344,6 +342,7 @@ model ReceptionItem {
   @@index([saleUnitId])
 }
 
+// Tabla histórica del módulo retirado. Se conserva para las instalaciones existentes.
 model MarketReferencePrice {
   id            String   @id @default(cuid())
   cropId        String
@@ -359,13 +358,11 @@ model MarketReferencePrice {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  crop Crop @relation(fields: [cropId], references: [id])
-  unit Unit @relation(fields: [unitId], references: [id])
-
   @@unique([cropId, unitId])
   @@index([cropId])
   @@index([unitId])
   @@index([effectiveDate])
+  @@ignore
 }
 
 enum MarketPayment {

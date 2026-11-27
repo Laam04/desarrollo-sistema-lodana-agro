@@ -165,7 +165,7 @@ export async function GET(request: Request) {
         ] : undefined,
       },
       include: receptionShipmentInclude,
-      orderBy: [{ date: historical ? 'desc' : 'asc' }, { id: historical ? 'desc' : 'asc' }],
+      orderBy: [{ date: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
       take,
       skip,
     })
@@ -231,7 +231,7 @@ export async function POST(request: Request) {
         if (!shipment) throw new ProductionError('Envío no encontrado.', 404)
         const existing = await tx.reception.findUnique({
           where: { id },
-          include: { items: { where: { deletedAt: null }, include: { saleUnit: { select: { name: true } } } } },
+          include: { items: { where: { deletedAt: null, parentItemId: null }, include: { saleUnit: { select: { name: true } } } } },
         })
         if (existing) {
           if (!receptionMatches(existing, matchParams)) {
@@ -344,7 +344,7 @@ export async function POST(request: Request) {
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
         const [existing, shipment] = await Promise.all([
-          prisma.reception.findUnique({ where: { id }, include: { items: { where: { deletedAt: null }, include: { saleUnit: { select: { name: true } } } } } }),
+          prisma.reception.findUnique({ where: { id }, include: { items: { where: { deletedAt: null, parentItemId: null }, include: { saleUnit: { select: { name: true } } } } } }),
           prisma.shipment.findFirst({ where: { id: shipmentId, deletedAt: null }, include: receptionShipmentInclude }),
         ])
         if (existing && shipment) {

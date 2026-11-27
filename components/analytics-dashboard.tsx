@@ -6,6 +6,7 @@ import useSWR from 'swr'
 import { productionFetch } from '@/lib/production-client'
 import { forecastMinimum, monthDistance, monthsBetween, shiftMonth, type AnalyticsReport, type AnalyticsSeries, type Metric, type MonthRange } from '@/lib/analytics-model'
 import { AnalyticsChart, analyticsNumber, formatMonth } from '@/components/analytics-chart'
+import { AnalysisNote } from '@/components/analysis-note'
 
 const panel = 'min-w-0 rounded-2xl border border-[#dbe7dd] bg-white p-4 shadow-sm dark:border-[#2d3b32] dark:bg-[#18211c] sm:p-5'
 const field = 'min-w-0 w-full rounded-xl border border-border bg-background px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-emerald-600'
@@ -251,6 +252,15 @@ export function AnalyticsDashboard({ publicView = false }: { publicView?: boolea
   const series = filtered.find((item) => item.crop === chartCrop)
     ?? filtered.find((item) => item.crop === currentRanking[0]?.label)
     ?? filtered[0]
+  const closedReport = data && data.period.to === data.currentMonth
+    ? { ...data, period: { ...data.period, to: shiftMonth(data.period.to, -1) }, previous: { ...data.previous, from: shiftMonth(data.previous.from, 1) } }
+    : data
+  const highlights = closedReport && closedReport.period.from <= closedReport.period.to
+    ? ([['sold', 'cantidad vendida'], ['losses', 'mermas registradas'], ['useful', 'producción útil']] as const).flatMap(([metric, subject]) => {
+        const change = comparison(filtered, metric, closedReport, total(filtered, metric, closedReport.period))
+        return change === null ? [] : [{ metric, subject, change: Math.round(change * 1000) / 1000 }]
+      })
+    : []
 
   function apply(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -310,6 +320,21 @@ export function AnalyticsDashboard({ publicView = false }: { publicView?: boolea
       {(isLoading || isValidating) && <p role="status" className="text-sm text-muted-foreground">{data ? 'Actualizando estadísticas…' : 'Cargando estadísticas…'}</p>}
       {data && (
         <>
+          {!publicView && (
+            <section className={panel} aria-label="Balance del período">
+              <h3 className="mb-2 text-sm font-semibold">Balance del período</h3>
+              {highlights.length > 0 && closedReport ? (
+                <>
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    {highlights.map(({ metric, subject, change }) => (
+                      <AnalysisNote key={metric} change={change} subject={subject} unit={unit} lowerIsBetter={metric === 'losses'} />
+                    ))}
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">Meses cerrados de {formatMonth(closedReport.period.from)} a {formatMonth(closedReport.period.to)} frente al período anterior equivalente.</p>
+                </>
+              ) : <p className="text-sm text-muted-foreground">Selecciona meses cerrados con registros comparables para ver cambios en ventas, mermas y producción.</p>}
+            </section>
+          )}
           <div className="flex items-start gap-2 text-xs leading-5 text-muted-foreground">
             <CircleHelp className="mt-0.5 size-4 shrink-0" aria-hidden />
             <div>

@@ -1,6 +1,6 @@
 'use client'
 
-import { AlertCircle, ArrowDownRight, ArrowUpRight, CalendarDays, Download, FileSpreadsheet, FileText, Info, Sparkles } from 'lucide-react'
+import { AlertCircle, ArrowDownRight, ArrowUpRight, CalendarDays, FileSpreadsheet, FileText, Info, Sparkles } from 'lucide-react'
 import { AnalyticsChart } from '@/components/analytics-chart'
 import { marketUi } from '@/components/market-ui'
 import type { ReportPayload } from '@/lib/report-generator'
@@ -124,6 +124,23 @@ export function ReportPreview({
             </p>
           </div>
         </div>
+      )}
+
+      {payload.observations.length > 0 && (
+        <section className={`${marketUi.panel} p-5`}>
+          <h4 className="flex items-center gap-2 text-sm font-semibold">
+            <Sparkles className="size-4 text-[#2c6048] dark:text-[#a8d5b3]" aria-hidden />
+            Observaciones del período
+          </h4>
+          <ul className="mt-3 grid gap-2 text-sm text-foreground lg:grid-cols-2">
+            {payload.observations.map((observation) => (
+              <li key={observation} className="flex items-start gap-2 rounded-xl bg-emerald-50/50 p-3 text-xs leading-5 dark:bg-emerald-950/20">
+                <Info className="mt-0.5 size-3.5 shrink-0 text-[#2c6048] dark:text-[#a8d5b3]" aria-hidden />
+                <span>{observation}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
 
       {/* Indicadores principales */}
@@ -283,23 +300,7 @@ export function ReportPreview({
         </div>
       )}
 
-      {/* Observaciones automáticas y limitaciones */}
-      <div className="grid gap-4 lg:grid-cols-2">
-        <section className={`${marketUi.panel} p-5`}>
-          <div className="flex items-center gap-2">
-            <Sparkles className="size-4 text-[#2c6048] dark:text-[#a8d5b3]" />
-            <h4 className="text-sm font-semibold">Observaciones automáticas (deterministas)</h4>
-          </div>
-          <ul className="mt-3 grid gap-2 text-sm text-foreground">
-            {payload.observations.map((obs) => (
-              <li key={obs} className="flex items-start gap-2 rounded-xl bg-emerald-50/50 p-3 text-xs leading-5 dark:bg-emerald-950/20">
-                <Info className="mt-0.5 size-3.5 shrink-0 text-[#2c6048] dark:text-[#a8d5b3]" />
-                <span>{obs}</span>
-              </li>
-            ))}
-          </ul>
-        </section>
-
+      {payload.limitations.length > 0 && (
         <section className={`${marketUi.panel} p-5`}>
           <div className="flex items-center gap-2">
             <AlertCircle className="size-4 text-amber-700 dark:text-amber-300" />
@@ -308,14 +309,13 @@ export function ReportPreview({
           <ul className="mt-3 grid gap-2 text-sm text-foreground">
             {payload.limitations.map((lim) => (
               <li key={lim} className="flex items-start gap-2 rounded-xl bg-amber-50/60 p-3 text-xs leading-5 dark:bg-amber-950/20">
-                <Download className="mt-0.5 hidden size-3.5" aria-hidden />
                 <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-amber-600 dark:bg-amber-400" />
                 <span>{lim}</span>
               </li>
             ))}
           </ul>
         </section>
-      </div>
+      )}
     </div>
   )
 }

@@ -6,6 +6,8 @@ import { historyQuery } from '@/lib/production-history'
 import { endOfDay } from '@/lib/production-stock'
 import { parseDate, parsePositiveDecimal } from '@/lib/production-validation'
 import { farmSupplier, marketDay, marketWeek, markupPercent, receiptCode, sheetColumns } from '@/lib/market-data'
+import { addDays, ecuadorDateRangeToUtc } from '@/lib/report-periods'
+import { safePercentChange } from '@/lib/report-insights'
 
 const productInclude = {
   reception: { select: { receiptNumber: true, receivedAt: true, shipment: { select: { code: true } } } },
@@ -16,15 +18,6 @@ const productInclude = {
 const saleInclude = { receptionItem: { include: productInclude } } satisfies Prisma.MarketSaleInclude
 type Product = Prisma.ReceptionItemGetPayload<{ include: typeof productInclude }>
 type Sale = Prisma.MarketSaleGetPayload<{ include: typeof saleInclude }>
-
-type MarketPriceSummary = {
-  priceUsd: string
-  minPriceUsd: string | null
-  maxPriceUsd: string | null
-  marketName: string
-  source: string
-  effectiveDate: string
-}
 
 const activeSaleParent = {
   receptionItem: {
@@ -45,7 +38,7 @@ function effectiveUnitCost(row: {
   return row.saleUnitCost ?? row.shipmentItem.estimatedUnitPrice
 }
 
-function productData(row: Product, marketPrice?: MarketPriceSummary | null) {
+function productData(row: Product) {
   const unit = effectiveUnit(row)
   const cost = effectiveUnitCost(row)
   const isConverted = Boolean(row.saleUnitId || row.parentItemId)
@@ -64,7 +57,6 @@ function productData(row: Product, marketPrice?: MarketPriceSummary | null) {
     isConverted,
     productionUnitPrice: cost ? cost.toDecimalPlaces(2) : null,
     customerUnitPrice: row.customerUnitPrice,
-    marketPrice: marketPrice ?? null,
   }
 }
 
@@ -116,33 +108,11 @@ async function stock(request: Request, date: Date, params: URLSearchParams) {
       where: { id: { in: available.map((row) => row.id) } },
       include: productInclude,
     })
-    const cropIds = [...new Set(products.map((p) => p.shipmentItem.cropId))]
-    const refPrices = cropIds.length
-      ? await tx.marketReferencePrice.findMany({
-          where: { cropId: { in: cropIds } },
-        })
-      : []
-    const refByKey = new Map(
-      refPrices.map((rp) => [
-        `${rp.cropId}|${rp.unitId}`,
-        {
-          priceUsd: rp.priceUsd.toFixed(2),
-          minPriceUsd: rp.minPriceUsd ? rp.minPriceUsd.toFixed(2) : null,
-          maxPriceUsd: rp.maxPriceUsd ? rp.maxPriceUsd.toFixed(2) : null,
-          marketName: rp.marketName,
-          source: rp.source,
-          effectiveDate: rp.effectiveDate.toISOString().slice(0, 10),
-        } satisfies MarketPriceSummary,
-      ]),
-    )
-
     const byId = new Map(products.map((product) => [product.id, product]))
     return result(available.flatMap((row) => {
       const product = byId.get(row.id)
       if (!product) return []
-      const unitId = product.saleUnitId ?? product.shipmentItem.unitId
-      const marketPrice = refByKey.get(`${product.shipmentItem.cropId}|${unitId}`) ?? null
-      return [{ ...productData(product, marketPrice), available: row.available }]
+      return [{ ...productData(product), available: row.available }]
     }))
   }, { isolationLevel: 'RepeatableRead' })
 }
@@ -182,7 +152,10 @@ function exportSheet(rows: Sale[], date: string) {
 }
 
 async function salesSummary(where: Prisma.MarketSaleWhereInput, from: string, to: string) {
-  const rows = await prisma.marketSale.findMany({
+  const lastClosedDay = addDays(marketDay(), -1)
+  const comparisonTo = to < lastClosedDay ? to : lastClosedDay
+  const previous = ecuadorDateRangeToUtc(addDays(from, -7), addDays(comparisonTo, -7))
+  const [rows, previousSales] = await prisma.$transaction([prisma.marketSale.findMany({
     where,
     select: {
       date: true,
@@ -196,10 +169,14 @@ async function salesSummary(where: Prisma.MarketSaleWhereInput, from: string, to
       },
     },
     orderBy: { date: 'asc' },
-  })
+  }), prisma.marketSale.aggregate({
+    where: { ...where, date: { gte: previous.dateStart, lt: previous.dateEndExclusive } },
+    _sum: { total: true },
+  })], { isolationLevel: 'RepeatableRead' })
   const days = new Map<string, { date: string; total: Prisma.Decimal; count: number }>()
   let total = new Prisma.Decimal(0)
   let profit = new Prisma.Decimal(0)
+  let comparableTotal = new Prisma.Decimal(0)
   let missingCost = 0
   for (const row of rows) {
     const date = row.date.toISOString().slice(0, 10)
@@ -208,11 +185,17 @@ async function salesSummary(where: Prisma.MarketSaleWhereInput, from: string, to
     day.count++
     days.set(date, day)
     total = total.plus(row.total)
+    if (date <= comparisonTo) comparableTotal = comparableTotal.plus(row.total)
     const cost = effectiveUnitCost(row.receptionItem)
     if (cost?.gt(0)) profit = profit.plus(row.total.minus(cost.mul(row.quantity).toDecimalPlaces(2)))
     else missingCost++
   }
-  return { from, to, total, profit: rows.length > missingCost ? profit : null, count: rows.length, missingCost, days: [...days.values()] }
+  const salesChange = comparisonTo < from
+    ? null
+    : safePercentChange(comparableTotal.toNumber(), previousSales._sum.total?.toNumber() ?? null)
+  return { from, to, total, profit: rows.length > missingCost ? profit : null, count: rows.length, missingCost, days: [...days.values()],
+    comparison: { through: comparisonTo >= from ? comparisonTo : null, salesChange },
+  }
 }
 
 export async function GET(request: Request) {

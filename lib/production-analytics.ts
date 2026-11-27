@@ -137,6 +137,7 @@ async function loadMovements(
       JOIN "ShipmentItem" i ON i.id = ri."shipmentItemId" AND i."shipmentId" = r."shipmentId"
       JOIN "Shipment" s ON s.id = r."shipmentId"
       WHERE r."deletedAt" IS NULL AND ri."deletedAt" IS NULL AND i."deletedAt" IS NULL
+        AND ri."parentItemId" IS NULL
         AND s."deletedAt" IS NULL AND s.status <> 'CANCELLED'
         AND ${inWindows(Prisma.sql`r."receivedAt"`, receptionDates)} AND r."receivedAt" <= ${receiptCutoff}
       GROUP BY 1, 2, 3
@@ -212,8 +213,7 @@ function addMovement(
   }
 }
 
-export async function productionAnalytics(request: Request, publicView: boolean): Promise<AnalyticsReport> {
-  const now = new Date()
+export async function productionAnalytics(request: Request, publicView: boolean, now = new Date()): Promise<AnalyticsReport> {
   const today = marketDay(now)
   const dayEnd = new Date(new Date(today + 'T00:00:00Z').getTime() + 86_400_000)
   const currentMonth = today.slice(0, 7)
