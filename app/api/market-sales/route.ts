@@ -154,8 +154,11 @@ function exportSheet(rows: Sale[], date: string) {
 async function salesSummary(where: Prisma.MarketSaleWhereInput, from: string, to: string) {
   const lastClosedDay = addDays(marketDay(), -1)
   const comparisonTo = to < lastClosedDay ? to : lastClosedDay
-  const previous = ecuadorDateRangeToUtc(addDays(from, -7), addDays(comparisonTo, -7))
-  const [rows, previousSales] = await prisma.$transaction([prisma.marketSale.findMany({
+  const current = ecuadorDateRangeToUtc(from, comparisonTo)
+  const previousFrom = addDays(from, -7)
+  const previousTo = addDays(comparisonTo, -7)
+  const previous = ecuadorDateRangeToUtc(previousFrom, previousTo)
+  const [rows, previousSales, receipts] = await prisma.$transaction([prisma.marketSale.findMany({
     where,
     select: {
       date: true,
@@ -172,7 +175,22 @@ async function salesSummary(where: Prisma.MarketSaleWhereInput, from: string, to
   }), prisma.marketSale.aggregate({
     where: { ...where, date: { gte: previous.dateStart, lt: previous.dateEndExclusive } },
     _sum: { total: true },
-  })], { isolationLevel: 'RepeatableRead' })
+  }), prisma.$queryRaw<{ unitId: string; unit: string; current: Prisma.Decimal; previous: Prisma.Decimal }[]>`
+    SELECT u.id AS "unitId", u.name AS unit,
+      COALESCE(SUM(ri."receivedQuantity") FILTER (WHERE r."receivedAt" >= ${current.ecStart}), 0) AS "current",
+      COALESCE(SUM(ri."receivedQuantity") FILTER (WHERE r."receivedAt" < ${previous.ecEndExclusive}), 0) AS "previous"
+    FROM "Reception" r
+    JOIN "Shipment" sh ON sh.id = r."shipmentId"
+    JOIN "ReceptionItem" ri ON ri."receptionId" = r.id
+    JOIN "ShipmentItem" si ON si.id = ri."shipmentItemId" AND si."shipmentId" = sh.id
+    JOIN "Unit" u ON u.id = si."unitId"
+    WHERE ((r."receivedAt" >= ${current.ecStart} AND r."receivedAt" < ${current.ecEndExclusive})
+       OR (r."receivedAt" >= ${previous.ecStart} AND r."receivedAt" < ${previous.ecEndExclusive}))
+      AND r."deletedAt" IS NULL AND sh."deletedAt" IS NULL AND sh.status <> 'CANCELLED'
+      AND ri."deletedAt" IS NULL AND ri."parentItemId" IS NULL AND si."deletedAt" IS NULL
+    GROUP BY u.id, u.name
+    ORDER BY u.name, u.id
+  `], { isolationLevel: 'RepeatableRead' })
   const days = new Map<string, { date: string; total: Prisma.Decimal; count: number }>()
   let total = new Prisma.Decimal(0)
   let profit = new Prisma.Decimal(0)
@@ -194,7 +212,12 @@ async function salesSummary(where: Prisma.MarketSaleWhereInput, from: string, to
     ? null
     : safePercentChange(comparableTotal.toNumber(), previousSales._sum.total?.toNumber() ?? null)
   return { from, to, total, profit: rows.length > missingCost ? profit : null, count: rows.length, missingCost, days: [...days.values()],
-    comparison: { through: comparisonTo >= from ? comparisonTo : null, salesChange },
+    comparison: {
+      through: comparisonTo >= from ? comparisonTo : null,
+      previousFrom, previousTo, salesChange,
+      sales: { current: comparableTotal, previous: previousSales._sum.total ?? new Prisma.Decimal(0) },
+      receipts,
+    },
   }
 }
 

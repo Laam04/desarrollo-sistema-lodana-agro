@@ -26,6 +26,10 @@ function showQuantity(value: number | null, unit = '') {
   return value === null ? '—' : analyticsNumber.format(value) + (unit ? ' ' + unit : '')
 }
 
+function formatMonthRange({ from, to }: MonthRange) {
+  return from === to ? formatMonth(from) : `${formatMonth(from)} a ${formatMonth(to)}`
+}
+
 function inPeriod(month: string, range: MonthRange) {
   return month >= range.from && month <= range.to
 }
@@ -49,10 +53,10 @@ function availableMonths(series: AnalyticsSeries[], metric: Metric, range: Month
   ))).size
 }
 
-function comparison(series: AnalyticsSeries[], metric: Metric, report: AnalyticsReport, current: number | null) {
+function comparablePrevious(series: AnalyticsSeries[], metric: Metric, report: AnalyticsReport, current: number | null) {
   if (current === null || report.period.to === report.currentMonth) return null
   const before = total(series, metric, report.previous)
-  if (before === null || before <= 0) return null
+  if (before === null) return null
   const offset = monthDistance(report.previous.from, report.period.from)
   for (const item of series) {
     const points = item.monthly.filter((point) => point[metric] !== undefined)
@@ -64,7 +68,12 @@ function comparison(series: AnalyticsSeries[], metric: Metric, report: Analytics
     })
     if (!compatible) return null
   }
-  return (current - before) / before
+  return before
+}
+
+function comparison(series: AnalyticsSeries[], metric: Metric, report: AnalyticsReport, current: number | null) {
+  const before = comparablePrevious(series, metric, report, current)
+  return current !== null && before !== null && before > 0 ? (current - before) / before : null
 }
 
 function InfoPanel({ title, icon: Icon, note, children }: {
@@ -255,10 +264,10 @@ export function AnalyticsDashboard({ publicView = false }: { publicView?: boolea
   const closedReport = data && data.period.to === data.currentMonth
     ? { ...data, period: { ...data.period, to: shiftMonth(data.period.to, -1) }, previous: { ...data.previous, from: shiftMonth(data.previous.from, 1) } }
     : data
-  const highlights = closedReport && closedReport.period.from <= closedReport.period.to
-    ? ([['sold', 'cantidad vendida'], ['losses', 'mermas registradas'], ['useful', 'producción útil']] as const).flatMap(([metric, subject]) => {
-        const change = comparison(filtered, metric, closedReport, total(filtered, metric, closedReport.period))
-        return change === null ? [] : [{ metric, subject, change: Math.round(change * 1000) / 1000 }]
+  const highlights = !publicView && closedReport && closedReport.period.from <= closedReport.period.to
+    ? ([['harvested', 'producción cosechada'], ['useful', 'producción útil'], ['losses', 'merma registrada'], ['sold', 'cantidad vendida']] as const).map(([metric, subject]) => {
+        const current = total(filtered, metric, closedReport.period)
+        return { metric, subject, current, previous: comparablePrevious(filtered, metric, closedReport, current) }
       })
     : []
 
@@ -321,18 +330,27 @@ export function AnalyticsDashboard({ publicView = false }: { publicView?: boolea
       {data && (
         <>
           {!publicView && (
-            <section className={panel} aria-label="Balance del período">
-              <h3 className="mb-2 text-sm font-semibold">Balance del período</h3>
+            <section className={panel} aria-labelledby="production-period-heading" aria-busy={isValidating}>
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <h3 id="production-period-heading" className="text-base font-semibold">Cómo cambió la producción</h3>
+                <button type="button" className={button} onClick={() => {
+                  const month = shiftMonth(data.currentMonth, -1)
+                  setSelected({ from: month, to: month })
+                  setDraft(null)
+                  setFilterError('')
+                }}>Último mes cerrado</button>
+              </div>
               {highlights.length > 0 && closedReport ? (
                 <>
-                  <div className="grid gap-2 sm:grid-cols-3">
-                    {highlights.map(({ metric, subject, change }) => (
-                      <AnalysisNote key={metric} change={change} subject={subject} unit={unit} lowerIsBetter={metric === 'losses'} />
+                  <p className="mb-3 text-sm text-muted-foreground">{formatMonthRange(closedReport.period)} frente a {formatMonthRange(closedReport.previous)}{unit ? ` · ${crops.includes(crop) ? crop : 'Todos los cultivos'} · ${unit}` : ''}</p>
+                  <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                    {highlights.map(({ metric, subject, current, previous }) => (
+                      <AnalysisNote key={metric} subject={subject} current={current} previous={previous} formatValue={(value) => showQuantity(value, unit)} lowerIsBetter={metric === 'losses'} />
                     ))}
                   </div>
-                  <p className="mt-2 text-xs text-muted-foreground">Meses cerrados de {formatMonth(closedReport.period.from)} a {formatMonth(closedReport.period.to)} frente al período anterior equivalente.</p>
+                  {highlights.some(({ previous }) => previous === null) && <p className="mt-2 text-xs text-muted-foreground">La comparación requiere registros en meses equivalentes para el cultivo y la unidad seleccionados.</p>}
                 </>
-              ) : <p className="text-sm text-muted-foreground">Selecciona meses cerrados con registros comparables para ver cambios en ventas, mermas y producción.</p>}
+              ) : <p className="text-sm text-muted-foreground">El período seleccionado todavía no tiene meses cerrados para comparar.</p>}
             </section>
           )}
           <div className="flex items-start gap-2 text-xs leading-5 text-muted-foreground">

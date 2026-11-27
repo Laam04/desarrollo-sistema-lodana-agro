@@ -135,7 +135,14 @@ export type MarketSalesSummary = {
   profit: string | null
   count: number
   missingCost: number
-  comparison: { through: string | null; salesChange: number | null }
+  comparison: {
+    through: string | null
+    previousFrom: string
+    previousTo: string
+    salesChange: number | null
+    sales: { current: string; previous: string }
+    receipts: { unitId: string; unit: string; current: string; previous: string }[]
+  }
   days: { date: string; total: string; count: number }[]
 }
 

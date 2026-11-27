@@ -4,13 +4,15 @@ import Link from 'next/link'
 import { useState } from 'react'
 import { CalendarDays, ChevronRight, ClipboardCheck, History, ShoppingBasket } from 'lucide-react'
 import useSWR from 'swr'
-import { marketDay, units, usd, type MarketSalesSummary, type MarketShipment, type PageResult } from '@/lib/market-data'
+import { marketDay, marketWeek, units, usd, type MarketSalesSummary, type MarketShipment, type PageResult } from '@/lib/market-data'
 import { formatDate, productionFetch } from '@/lib/production-client'
+import { addDays } from '@/lib/report-periods'
 import { MarketError, marketUi } from '@/components/market-ui'
 import { AnalysisNote } from '@/components/analysis-note'
 
 export function MarketSummary() {
   const [date, setDate] = useState(marketDay)
+  const [receiptUnit, setReceiptUnit] = useState('')
   const { data, error, mutate } = useSWR<MarketSalesSummary>(
     '/api/market-sales?' + new URLSearchParams({ view: 'summary', date }), productionFetch,
   )
@@ -19,6 +21,8 @@ export function MarketSummary() {
     productionFetch,
   )
   const pendingCount = pendingReceptions?.rows.length ?? 0
+  const receipts = data?.comparison.receipts ?? []
+  const received = receipts.find((row) => row.unitId === receiptUnit) ?? receipts[0]
 
   return (
     <div className="grid gap-4 sm:gap-5">
@@ -78,19 +82,40 @@ export function MarketSummary() {
         {!error && !data && <p role="status" className="mt-4 text-sm text-muted-foreground">Cargando resumen…</p>}
         {data && (
           <>
-            <div className="mt-4 grid gap-2" aria-label="Comparación de ventas">
-              {data.comparison.salesChange !== null ? (
+            <section className="mt-5 grid gap-3" aria-labelledby="market-period-heading">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 id="market-period-heading" className="text-base font-semibold">Cómo cambió Agro Market</h3>
+                {received && receipts.length > 1 && (
+                  <label className="flex flex-wrap items-center gap-2 text-xs font-medium">
+                    Unidad recibida
+                    <select value={received.unitId} onChange={(event) => setReceiptUnit(event.target.value)} className={marketUi.input}>
+                      {receipts.map(({ unitId, unit }) => <option key={unitId} value={unitId}>{unit}</option>)}
+                    </select>
+                  </label>
+                )}
+              </div>
+              {data.comparison.through ? (
                 <>
-                  <AnalysisNote change={data.comparison.salesChange / 100} subject="ventas en dólares" />
-                  <p className="text-xs text-muted-foreground">Días cerrados hasta el {formatDate(data.comparison.through!)} frente a los mismos días de la semana anterior.</p>
+                  <p className="text-sm text-muted-foreground">Del {formatDate(data.from)} al {formatDate(data.comparison.through)} frente al {formatDate(data.comparison.previousFrom)} al {formatDate(data.comparison.previousTo)}.</p>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <AnalysisNote subject="facturación" current={Number(data.comparison.sales.current)} previous={Number(data.comparison.sales.previous)} formatValue={usd} />
+                    {received ? (
+                      <AnalysisNote subject="cosecha recibida" current={Number(received.current)} previous={Number(received.previous)} formatValue={(value) => `${units(value)} ${received.unit}`} />
+                    ) : (
+                      <p className="rounded-xl bg-muted px-3 py-2.5 text-sm text-muted-foreground">Sin cosecha recibida en los dos períodos.</p>
+                    )}
+                  </div>
                 </>
               ) : (
-                <p className="text-sm text-muted-foreground">{data.comparison.through ? 'La semana anterior aún no aporta ventas para calcular una variación en esos días.' : 'La comparación se mostrará cuando cierre el primer día de la semana.'}</p>
+                <div className="flex flex-wrap items-center gap-3">
+                  <p className="text-sm text-muted-foreground">La semana seleccionada todavía no tiene días cerrados para comparar.</p>
+                  <button type="button" className={marketUi.button} onClick={() => setDate(addDays(marketWeek(marketDay()).from, -1))}>Última semana cerrada</button>
+                </div>
               )}
               {data.profit !== null && Number(data.profit) < 0 && (
                 <p className="rounded-xl bg-red-50 px-3 py-2 text-sm font-semibold text-red-900 dark:bg-red-950/50 dark:text-red-200">Pérdida bruta estimada de {usd(Math.abs(Number(data.profit)))} en ventas con costo registrado.</p>
               )}
-            </div>
+            </section>
             <p className="mt-4 flex items-center gap-2 text-sm text-muted-foreground">
               <CalendarDays className="size-4" aria-hidden /> Semana del {formatDate(data.from)} al {formatDate(data.to)}
             </p>
