@@ -7,6 +7,7 @@ import useSWR from 'swr'
 import { ApiError, createRequestId, formatDate, invalidateProduction, productionFetch } from '@/lib/production-client'
 import { cents, decimalInput, farmSupplier, formatMarkup, isValidIsoDay, marketDay, marketWeek, markupPercent, receiptCode, salesValue, sheetColumns, suggestRetailSalePrice, units, usd, type PageResult, type SaleRow, type SalesDay, type StockRow } from '@/lib/market-data'
 import { MarketDialog, MarketError, MarketPagination, marketUi } from '@/components/market-ui'
+import { navigateWithTransition } from '@/components/route-transition-overlay'
 
 const salesApi = '/api/market-sales'
 
@@ -46,7 +47,7 @@ export function MarketSales() {
     try {
       const response = await fetch(salesApi + '?' + new URLSearchParams({ date, period, export: 'csv' }))
       if (response.status === 401) {
-        window.location.replace('/')
+        navigateWithTransition('/', { replace: true, label: 'Tu sesión expiró…' })
         return
       }
       if (!response.ok) {
@@ -240,11 +241,14 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
     product?.customerUnitPrice ?? null,
   )
   const suggestedSalePrice = retailSuggestion?.price ?? null
+  const normalizedPrice = decimalInput(price)
+  const parsedPrice = Number(normalizedPrice)
   const belowProductionCost =
-    Boolean(price.trim()) &&
+    Boolean(normalizedPrice) &&
     product?.productionUnitPrice != null &&
-    Number(price) > 0 &&
-    Number(price) < Number(product.productionUnitPrice)
+    Number.isFinite(parsedPrice) &&
+    parsedPrice > 0 &&
+    parsedPrice < Number(product.productionUnitPrice)
   const estimate = salesValue(quantity, price)
   const amount = cents(quantity)
   const exceeds = available !== undefined && amount !== null && amount > (cents(available) ?? 0)
@@ -466,7 +470,7 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
         </div>
         {belowProductionCost && (
           <p role="status" className="rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-xs font-medium text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
-            Aviso: el precio ingresado ({usd(price)}) está por debajo del costo referencial de producción ({usd(product?.productionUnitPrice)}). Puedes guardarlo igual si así lo decides.
+            Aviso: el precio ingresado ({usd(normalizedPrice)}) está por debajo del costo referencial de producción ({usd(product?.productionUnitPrice)}). Puedes guardarlo igual si así lo decides.
           </p>
         )}
         {exceeds && !canRetry && <MarketError message="La cantidad supera el saldo del producto en este recibo." />}
@@ -531,15 +535,19 @@ function SaleEditor({ date, editing, onSaved, stopEditing }: {
               className={marketUi.input}
             />
           </label>
-          {product.productionUnitPrice && Number(convertQty) > 0 && Number(available) > 0 && (
-            <p className="rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200">
-              Costo base proporcional:{' '}
-              <strong>
-                {usd(((Number(product.productionUnitPrice) * Number(available)) / Number(convertQty)).toFixed(2))}
-              </strong>{' '}
-              por nueva unidad.
-            </p>
-          )}
+          {(() => {
+            const parsedConvertQty = Number(decimalInput(convertQty))
+            if (!product.productionUnitPrice || !Number.isFinite(parsedConvertQty) || parsedConvertQty <= 0 || Number(available) <= 0) return null
+            return (
+              <p className="rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200">
+                Costo base proporcional:{' '}
+                <strong>
+                  {usd(((Number(product.productionUnitPrice) * Number(available)) / parsedConvertQty).toFixed(2))}
+                </strong>{' '}
+                por nueva unidad.
+              </p>
+            )
+          })()}
           {convertError && <MarketError message={convertError} />}
         </MarketDialog>
       )}

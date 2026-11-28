@@ -13,7 +13,6 @@ import {
   type ReactNode,
 } from 'react'
 import {
-  ArrowLeft,
   Ban,
   BarChart3,
   CalendarDays,
@@ -24,6 +23,7 @@ import {
   ChevronRight,
   ClipboardList,
   DollarSign,
+  FileBarChart2,
   Image as ImageIcon,
   Inbox,
   Loader2,
@@ -55,6 +55,7 @@ import {
 } from '@/lib/market-data'
 import { editableShipmentStatuses, shipmentStatusLabels } from '@/lib/shipment-status'
 import { ReceiptPhotoField, ReceiptPhotoModal } from '@/components/receipt-photo-field'
+import { triggerBrandTransition } from '@/components/route-transition-overlay'
 
 /* ───────────────────────── Tipos ───────────────────────── */
 
@@ -272,7 +273,17 @@ const commonLossReasons = [
   'Clima o lluvia',
 ] as const
 
+const CUSTOM_LOSS_REASONS_STORAGE_KEY = 'lodana-custom-loss-reasons'
 const CUSTOM_EXPENSES_STORAGE_KEY = 'lodana-custom-expenses'
+
+function normalizeQuickOption(value: string) {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+}
 
 const quickFarmExpenses = [
   {
@@ -790,14 +801,16 @@ export function ProductionEasyHome() {
 
   const readyToShipCount = availability.filter((item) => Number(item.available) > 0).length
   const harvestsTodayCount = todayHarvests?.rows.length ?? 0
+  const harvestsTodayLabel = `${harvestsTodayCount}${todayHarvests?.hasNext ? '+' : ''}`
   const costsTodayCount = todayCosts?.rows.length ?? 0
+  const costsTodayLabel = `${costsTodayCount}${todayCosts?.hasNext ? '+' : ''}`
 
   const mainActions = [
     {
       href: '/lodana?seccion=cosechas',
       title: 'Anotar cosecha',
       subtitle: 'Registra lo que cosechaste en la finca.',
-      badge: harvestsTodayCount > 0 ? `${harvestsTodayCount} hoy` : 'Diario',
+      badge: harvestsTodayCount > 0 ? `${harvestsTodayLabel} hoy` : 'Diario',
       icon: Wheat,
       accent: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-200',
       border: 'hover:border-emerald-600',
@@ -824,7 +837,7 @@ export function ProductionEasyHome() {
       href: '/lodana?seccion=costos',
       title: 'Anotar gasto',
       subtitle: 'Insumos, abonos, jornales o pagos de la finca.',
-      badge: costsTodayCount > 0 ? `${costsTodayCount} hoy` : 'Finca o cultivo',
+      badge: costsTodayCount > 0 ? `${costsTodayLabel} hoy` : 'Finca o cultivo',
       icon: DollarSign,
       accent: 'bg-violet-100 text-violet-800 dark:bg-violet-900/50 dark:text-violet-200',
       border: 'hover:border-violet-600',
@@ -832,6 +845,12 @@ export function ProductionEasyHome() {
   ] as const
 
   const secondaryActions = [
+    {
+      href: '/lodana?seccion=reportes',
+      title: 'Reportes e impacto',
+      subtitle: 'Reportes automáticos semanales, mensuales y PDF',
+      icon: FileBarChart2,
+    },
     {
       href: '/lodana?seccion=resumen',
       title: 'Ver cómo va la finca',
@@ -870,7 +889,7 @@ export function ProductionEasyHome() {
           </div>
           <div className="flex flex-wrap gap-2">
             <span className="rounded-full border border-[#c7d8ca] bg-white/90 px-3 py-1 text-xs font-semibold text-foreground dark:border-[#34453a] dark:bg-[#141d18]">
-              {harvestsTodayCount} cosecha(s) hoy
+              {harvestsTodayLabel} cosecha(s) hoy
             </span>
             <span className="rounded-full border border-[#c7d8ca] bg-white/90 px-3 py-1 text-xs font-semibold text-foreground dark:border-[#34453a] dark:bg-[#141d18]">
               {readyToShipCount} listo(s) para enviar
@@ -920,7 +939,7 @@ export function ProductionEasyHome() {
         <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground sm:text-sm">
           Resultados y configuración de la finca
         </h3>
-        <div className="grid gap-2.5 md:grid-cols-3 sm:gap-3">
+        <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4 sm:gap-3">
           {secondaryActions.map((item) => {
             const Icon = item.icon
             return (
@@ -985,6 +1004,10 @@ export function ProductionEasySection({
   const [selectedHarvest, setSelectedHarvest] = useState<HistoryRow | null>(null)
   const [lossQuantity, setLossQuantity] = useState('')
   const [lossReason, setLossReason] = useState('')
+  const [customLossReasons, setCustomLossReasons] = useState<string[]>([])
+  const [showNewLossReason, setShowNewLossReason] = useState(false)
+  const [newLossReasonName, setNewLossReasonName] = useState('')
+  const newLossReasonInputRef = useRef<HTMLInputElement>(null)
   const [affectsHarvest, setAffectsHarvest] = useState<'true' | 'false' | ''>('true')
   const [lossPhotoAction, setLossPhotoAction] = useState<'keep' | 'replace' | 'remove'>('keep')
   const [lossPhotoDataUrl, setLossPhotoDataUrl] = useState<string | null>(null)
@@ -1024,6 +1047,69 @@ export function ProductionEasySection({
     fileName?: string | null
     heading?: string
   } | null>(null)
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(CUSTOM_LOSS_REASONS_STORAGE_KEY)
+      if (!raw) return
+      const parsed: unknown = JSON.parse(raw)
+      if (Array.isArray(parsed)) {
+        const clean = parsed
+          .filter((item): item is string => typeof item === 'string')
+          .map((item) => item.replace(/\s+/g, ' ').trim())
+          .filter((item) => item.length > 0 && item.length <= 120)
+        setCustomLossReasons(clean.slice(0, 30))
+      }
+    } catch {
+      // Ignora restricciones o datos inválidos en almacenamiento local
+    }
+  }, [])
+
+  useEffect(() => {
+    if (showNewLossReason) {
+      newLossReasonInputRef.current?.focus()
+    }
+  }, [showNewLossReason])
+
+  function saveCustomLossReasons(next: string[]) {
+    setCustomLossReasons(next)
+    try {
+      window.localStorage.setItem(CUSTOM_LOSS_REASONS_STORAGE_KEY, JSON.stringify(next))
+    } catch {
+      // Ignora restricciones de almacenamiento local
+    }
+  }
+
+  function handleAddCustomLossReason(rawName: string) {
+    const clean = rawName.replace(/\s+/g, ' ').trim().slice(0, 120)
+    if (!clean) return
+    const normalized = normalizeQuickOption(clean)
+    const existingPreset = commonLossReasons.find(
+      (reason) => normalizeQuickOption(reason) === normalized,
+    )
+    const existingCustom = customLossReasons.find(
+      (item) => normalizeQuickOption(item) === normalized,
+    )
+    const existing = existingPreset ?? existingCustom
+
+    if (!existing) {
+      saveCustomLossReasons([...customLossReasons, clean].slice(0, 30))
+    }
+    const chosen = existing ?? clean
+    setLossReason(chosen)
+    setNewLossReasonName('')
+    setShowNewLossReason(false)
+    setNotice({
+      kind: 'success',
+      text: existing
+        ? `Se seleccionó «${chosen}».`
+        : `Se añadió «${chosen}» como motivo rápido de pérdida.`,
+    })
+  }
+
+  function handleRemoveCustomLossReason(name: string) {
+    saveCustomLossReasons(customLossReasons.filter((item) => item !== name))
+  }
 
   useEffect(() => {
     try {
@@ -1223,6 +1309,8 @@ export function ProductionEasySection({
     setSelectedHarvest(null)
     setLossQuantity('')
     setLossReason('')
+    setShowNewLossReason(false)
+    setNewLossReasonName('')
     setAffectsHarvest('true')
     setLossPhotoAction('keep')
     setLossPhotoDataUrl(null)
@@ -1279,6 +1367,8 @@ export function ProductionEasySection({
       setSelectedHarvest(row.harvest ?? null)
       setLossQuantity(String(row.quantity ?? ''))
       setLossReason(row.reason?.name ?? '')
+      setShowNewLossReason(false)
+      setNewLossReasonName('')
       setAffectsHarvest(
         typeof row.affectsHarvest === 'boolean' ? (row.affectsHarvest ? 'true' : 'false') : 'true',
       )
@@ -1737,13 +1827,8 @@ export function ProductionEasySection({
     <div className="mx-auto grid max-w-4xl gap-5">
       <EasyToast notice={notice} onClose={() => setNotice(null)} />
 
-      {/* Barra superior: volver + selector Registrar / Historial */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <Link href="/lodana" prefetch={false} className={ui.btnOutline}>
-          <ArrowLeft className="size-5" />
-          Volver al inicio
-        </Link>
-
+      {/* Selector Registrar / Historial */}
+      <div className="flex flex-wrap items-center justify-end gap-3">
         <div
           role="tablist"
           aria-label="Cambiar entre registrar y ver historial"
@@ -2164,7 +2249,7 @@ export function ProductionEasySection({
                   <StepHeading
                     number={3}
                     title="¿Cuánto se perdió y por qué?"
-                    hint="Toca un motivo rápido o escríbelo con tus palabras."
+                    hint="Toca un motivo rápido, añade una nueva opción si fue por otra razón o escríbelo con tus palabras."
                   />
                   <div className="flex items-stretch gap-3">
                     <input
@@ -2187,23 +2272,110 @@ export function ProductionEasySection({
 
                   <div className="flex flex-wrap gap-2 pt-1">
                     {commonLossReasons.map((reason) => {
-                      const active = lossReason.trim().toLowerCase() === reason.toLowerCase()
+                      const active =
+                        normalizeQuickOption(lossReason) === normalizeQuickOption(reason)
                       return (
                         <button
                           key={reason}
                           type="button"
+                          aria-pressed={active}
                           onClick={() => setLossReason(reason)}
                           className={`min-h-10 rounded-full border-2 px-3.5 py-1.5 text-sm font-semibold transition ${
                             active
                               ? 'border-[#2c6048] bg-[#2c6048] text-white'
-                              : 'border-[#c7d8ca] bg-white text-foreground hover:border-[#2c6048] dark:border-[#34453a] dark:bg-[#18211c]'
+                              : 'border-[#c7d8ca] bg-white text-foreground hover:border-[#2c6048] hover:bg-[#eef5ef] dark:border-[#34453a] dark:bg-[#18211c]'
                           }`}
                         >
                           {reason}
                         </button>
                       )
                     })}
+
+                    {customLossReasons.map((item) => {
+                      const active =
+                        normalizeQuickOption(lossReason) === normalizeQuickOption(item)
+                      return (
+                        <span
+                          key={item}
+                          className={`inline-flex min-h-10 items-center overflow-hidden rounded-full border-2 text-sm font-semibold transition ${
+                            active
+                              ? 'border-[#2c6048] bg-[#2c6048] text-white'
+                              : 'border-[#c7d8ca] bg-white text-foreground hover:border-[#2c6048] dark:border-[#34453a] dark:bg-[#18211c]'
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            aria-pressed={active}
+                            onClick={() => setLossReason(item)}
+                            className="px-3.5 py-1.5 text-left"
+                          >
+                            {item}
+                          </button>
+                          <button
+                            type="button"
+                            aria-label={`Quitar motivo rápido ${item}`}
+                            title={`Quitar ${item}`}
+                            onClick={() => handleRemoveCustomLossReason(item)}
+                            className={`flex h-full items-center pr-2.5 pl-1 transition ${
+                              active
+                                ? 'text-emerald-100 hover:text-white'
+                                : 'text-muted-foreground hover:text-red-600'
+                            }`}
+                          >
+                            <X className="size-3.5" aria-hidden />
+                          </button>
+                        </span>
+                      )
+                    })}
+
+                    <button
+                      type="button"
+                      aria-expanded={showNewLossReason}
+                      onClick={() => setShowNewLossReason((v) => !v)}
+                      className="inline-flex min-h-10 items-center gap-1.5 rounded-full border-2 border-dashed border-[#2c6048] bg-white px-3.5 py-1.5 text-sm font-semibold text-[#2c6048] transition hover:bg-[#eef5ef] dark:bg-[#18211c] dark:text-[#a8d5b3]"
+                    >
+                      <Plus className="size-4" aria-hidden />
+                      Añadir otro motivo
+                    </button>
                   </div>
+
+                  {showNewLossReason && (
+                    <div className="grid gap-2 rounded-xl border-2 border-[#b7d3bc] bg-white p-3.5 dark:border-[#2d4537] dark:bg-[#18211c]">
+                      <p className="text-sm font-semibold text-foreground">
+                        Añadir un motivo de pérdida que no está en la lista
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        <input
+                          ref={newLossReasonInputRef}
+                          type="text"
+                          maxLength={120}
+                          placeholder="Ej. Daño por animales, falla de riego, caída en cosecha"
+                          aria-label="Nombre del nuevo motivo de pérdida"
+                          value={newLossReasonName}
+                          onChange={(e) => setNewLossReasonName(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault()
+                              handleAddCustomLossReason(newLossReasonName)
+                            }
+                          }}
+                          className={`${ui.input} min-w-44 flex-1`}
+                        />
+                        <button
+                          type="button"
+                          disabled={!newLossReasonName.trim()}
+                          onClick={() => handleAddCustomLossReason(newLossReasonName)}
+                          className={ui.btnPrimary}
+                        >
+                          <Plus className="size-4" aria-hidden />
+                          Agregar
+                        </button>
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Se seleccionará ahora y quedará guardado como botón rápido para próximas veces.
+                      </p>
+                    </div>
+                  )}
 
                   <input
                     required
@@ -2213,6 +2385,23 @@ export function ProductionEasySection({
                     onChange={(e) => setLossReason(e.target.value)}
                     className={ui.input}
                   />
+                  {lossReason.trim().length >= 3 &&
+                    !commonLossReasons.some(
+                      (reason) =>
+                        normalizeQuickOption(reason) === normalizeQuickOption(lossReason),
+                    ) &&
+                    !customLossReasons.some(
+                      (item) => normalizeQuickOption(item) === normalizeQuickOption(lossReason),
+                    ) && (
+                      <button
+                        type="button"
+                        onClick={() => handleAddCustomLossReason(lossReason)}
+                        className="inline-flex w-fit items-center gap-1.5 text-xs font-semibold text-[#2c6048] underline underline-offset-2 hover:text-[#1f4834] dark:text-[#a8d5b3]"
+                      >
+                        <Plus className="size-3.5" aria-hidden />
+                        Guardar «{lossReason.trim()}» como opción rápida
+                      </button>
+                    )}
                 </div>
 
                 <div className={ui.stepBox}>
@@ -2930,7 +3119,12 @@ export function ProductionEasySection({
 
                   {costApplication === 'CROP' && (
                     <div className="mt-2 flex flex-wrap gap-2">
-                      {crops.map((crop) => {
+                      {[
+                        ...crops,
+                        ...(editingRecord?.allocations ?? []).flatMap(({ crop }) =>
+                          crop && !crops.some((item) => item.id === crop.id) ? [crop] : [],
+                        ),
+                      ].map((crop) => {
                         const checked = costCropIds.includes(crop.id)
                         return (
                           <button
@@ -3292,7 +3486,10 @@ export function ProductionEasySection({
                       {section === 'cosechas' && (
                         <button
                           type="button"
-                          onClick={() => router.push(`/lodana?seccion=mermas&cosecha=${row.id}`)}
+                          onClick={() => {
+                            triggerBrandTransition('Abriendo reporte de pérdida…')
+                            router.push(`/lodana?seccion=mermas&cosecha=${row.id}`)
+                          }}
                           className={ui.btnSmall}
                         >
                           <TrendingDown className="size-4" />
@@ -3439,7 +3636,11 @@ export function ProductionEasySection({
               {costApplication === 'GENERAL'
                 ? 'toda la finca'
                 : costCropIds
-                    .map((id) => crops.find((c) => c.id === id)?.name)
+                    .map(
+                      (id) =>
+                        crops.find((c) => c.id === id)?.name ??
+                        editingRecord?.allocations?.find((a) => a.cropId === id)?.crop?.name,
+                    )
                     .filter(Boolean)
                     .join(', ')}
             </strong>

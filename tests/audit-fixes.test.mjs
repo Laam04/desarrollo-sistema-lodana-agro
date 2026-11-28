@@ -1,8 +1,16 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildForecast, describeSeasonality, shiftMonth } from '../lib/analytics-model.ts'
-import { parseDate } from '../lib/production-validation.ts'
-import { cents, isValidIsoDay, marketWeek, markupPercent, salesValue, suggestRetailSalePrice } from '../lib/market-data.ts'
+import {
+  buildForecast,
+  describeSeasonality,
+  formatChartAxisLabel,
+  formatChartDetailLabel,
+  isDayBucket,
+  isMonthBucket,
+  shiftMonth,
+} from '../lib/analytics-model.ts'
+import { normalizeCatalogName, parseDate } from '../lib/production-validation.ts'
+import { cents, decimalInput, isValidIsoDay, marketWeek, markupPercent, salesValue, suggestRetailSalePrice } from '../lib/market-data.ts'
 import { createSession, parseSession, readSession } from '../lib/profile-session.ts'
 
 test('parseDate acota fechas al rango 2000-2100 y rechaza años inválidos', () => {
@@ -106,4 +114,32 @@ test('createSession y parseSession firman con jti único y soportan rotación de
     if (prevOld === undefined) delete process.env.LODANA_SESSION_SECRET_PREVIOUS
     else process.env.LODANA_SESSION_SECRET_PREVIOUS = prevOld
   }
+})
+
+test('formatChartAxisLabel y formatChartDetailLabel soportan meses, días y etiquetas categóricas sin RangeError', () => {
+  assert.equal(isMonthBucket('2026-10'), true)
+  assert.equal(isMonthBucket('2026-10-15'), false)
+  assert.equal(isDayBucket('2026-10-15'), true)
+  assert.equal(isDayBucket('2026-02-30'), false)
+  assert.equal(isDayBucket('racimos'), false)
+
+  assert.match(formatChartAxisLabel('2026-10'), /oct/i)
+  assert.match(formatChartDetailLabel('2026-10'), /octubre/i)
+  assert.match(formatChartAxisLabel('2026-10-15'), /15/)
+  assert.equal(formatChartDetailLabel('2026-10-15'), '15/10/2026')
+  assert.equal(formatChartAxisLabel('racimos'), 'racimos')
+  assert.equal(formatChartDetailLabel('cajas'), 'cajas')
+  assert.equal(formatChartDetailLabel('2026-02-30'), '2026-02-30')
+})
+
+test('decimalInput y normalizeCatalogName soportan coma decimal ecuatoriana y tildes', () => {
+  assert.equal(decimalInput(' 1,50 '), '1.50')
+  assert.equal(cents('1,50'), 150)
+  assert.equal(salesValue('2,5', '1,20'), 3)
+  assert.deepEqual(suggestRetailSalePrice('2,00', '2,10'), {
+    price: '2.30',
+    reason: 'costo de producción + 15%',
+  })
+  assert.equal(normalizeCatalogName('Logística'), normalizeCatalogName('logistica'))
+  assert.equal(normalizeCatalogName('Daño por lluvia'), normalizeCatalogName('dano por lluvia'))
 })

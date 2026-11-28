@@ -9,7 +9,7 @@ export default async function ReportesPage() {
   const profile = await currentActor()
   if (profile !== 'queries' && profile !== 'admin') redirect('/')
   return (
-    <Suspense>
+    <Suspense fallback={null}>
       <ReportsWorkspace />
     </Suspense>
   )

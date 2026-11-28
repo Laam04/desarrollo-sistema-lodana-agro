@@ -51,7 +51,12 @@ export async function productionFetch<T>(url: string, init?: RequestInit): Promi
 
   const data = await response.json().catch(() => null)
   if (response.status === 401 && !url.startsWith('/api/profile-')) {
-    if (typeof window !== 'undefined') window.location.replace('/')
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('lodana:transition-start', { detail: { label: 'Tu sesión expiró…' } }),
+      )
+      window.requestAnimationFrame(() => window.location.replace('/'))
+    }
     throw new ApiError('Tu sesión expiró. Redirigiendo al inicio…', 401)
   }
   if (!response.ok || data === null) {

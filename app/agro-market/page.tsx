@@ -9,7 +9,7 @@ export default async function AgroMarketPage() {
   const profile = await currentActor()
   if (profile !== 'reception' && profile !== 'admin') redirect('/')
   return (
-    <Suspense fallback={<div className="p-8 text-sm text-muted-foreground">Cargando Agro Market…</div>}>
+    <Suspense fallback={null}>
       <MarketWorkspace />
     </Suspense>
   )

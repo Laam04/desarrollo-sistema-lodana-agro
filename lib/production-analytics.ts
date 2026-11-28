@@ -3,8 +3,8 @@ import { prisma } from '@/lib/prisma'
 import { ProductionError } from '@/lib/production-api'
 import { marketDay } from '@/lib/market-data'
 import {
-  buildForecast, describeSeasonality, historyMonths, monthDistance, shiftMonth,
-  type AnalyticsReport, type AnalyticsSeries, type MonthRange, type MonthlyPoint,
+  buildForecast, describeSeasonality, historyMonths, monthDistance, monthsBetween, shiftMonth,
+  type AnalyticsFinancials, type AnalyticsReport, type AnalyticsSeries, type MonthRange, type MonthlyPoint,
 } from '@/lib/analytics-model'
 
 const minimumPublicRecords = 3
@@ -27,6 +27,9 @@ type Movement = {
 }
 
 type Reason = { crop: string; unit: string; name: string; quantity: Prisma.Decimal }
+type MonthlyMoneyRow = { month: string; amount: Prisma.Decimal }
+type CategoryMoneyRow = { name: string; amount: Prisma.Decimal }
+type CropMoneyRow = { crop: string; amount: Prisma.Decimal }
 
 export function readAnalyticsPeriod(request: Request, latestMonth: string): MonthRange {
   const params = new URL(request.url).searchParams
@@ -181,6 +184,169 @@ async function loadReasons(tx: Prisma.TransactionClient, range: MonthRange, dayE
   `
 }
 
+async function loadFinancials(
+  tx: Prisma.TransactionClient,
+  period: MonthRange,
+  previous: MonthRange,
+  dayEnd: Date,
+  receiptCutoff: Date,
+): Promise<AnalyticsFinancials> {
+  const combinedRanges = rangesTogether([period, previous])
+  const combinedWindows = boundaries(combinedRanges)
+  const combinedReceiptWindows = boundaries(combinedRanges, true)
+  const periodWindows = boundaries([period])
+  const periodReceiptWindows = boundaries([period], true)
+
+  const [costMonths, deliveredMonths, saleMonths, topCategories, cropDelivered, cropSales, cropDirectCosts] =
+    await Promise.all([
+      tx.$queryRaw<MonthlyMoneyRow[]>`
+        SELECT to_char(c.date, 'YYYY-MM') AS month, SUM(c."amountUsd") AS amount
+        FROM "Cost" c
+        WHERE c."deletedAt" IS NULL
+          AND ${inWindows(Prisma.sql`c.date`, combinedWindows)} AND c.date < ${dayEnd}
+        GROUP BY 1
+      `,
+      tx.$queryRaw<MonthlyMoneyRow[]>`
+        SELECT to_char(r."receivedAt" AT TIME ZONE 'America/Guayaquil', 'YYYY-MM') AS month,
+          SUM(ROUND(ri."receivedQuantity" * COALESCE(i."estimatedUnitPrice", 0), 2)) AS amount
+        FROM "Reception" r
+        JOIN "ReceptionItem" ri ON ri."receptionId" = r.id
+        JOIN "ShipmentItem" i ON i.id = ri."shipmentItemId" AND i."shipmentId" = r."shipmentId"
+        JOIN "Shipment" s ON s.id = r."shipmentId"
+        WHERE r."deletedAt" IS NULL AND ri."deletedAt" IS NULL AND ri."parentItemId" IS NULL
+          AND i."deletedAt" IS NULL AND s."deletedAt" IS NULL AND s.status <> 'CANCELLED'
+          AND ${inWindows(Prisma.sql`r."receivedAt"`, combinedReceiptWindows)} AND r."receivedAt" <= ${receiptCutoff}
+        GROUP BY 1
+      `,
+      tx.$queryRaw<MonthlyMoneyRow[]>`
+        SELECT to_char(v.date, 'YYYY-MM') AS month, SUM(v.total) AS amount
+        FROM "MarketSale" v
+        JOIN "ReceptionItem" ri ON ri.id = v."receptionItemId"
+        JOIN "Reception" r ON r.id = ri."receptionId"
+        JOIN "ShipmentItem" i ON i.id = ri."shipmentItemId" AND i."shipmentId" = r."shipmentId"
+        JOIN "Shipment" s ON s.id = r."shipmentId"
+        WHERE v."cancelledAt" IS NULL AND r."deletedAt" IS NULL AND ri."deletedAt" IS NULL
+          AND i."deletedAt" IS NULL AND s."deletedAt" IS NULL AND s.status <> 'CANCELLED'
+          AND ${inWindows(Prisma.sql`v.date`, combinedWindows)} AND v.date < ${dayEnd} AND r."receivedAt" <= ${receiptCutoff}
+        GROUP BY 1
+      `,
+      tx.$queryRaw<CategoryMoneyRow[]>`
+        SELECT cat.name, SUM(c."amountUsd") AS amount
+        FROM "Cost" c
+        JOIN "CostCategory" cat ON cat.id = c."categoryId"
+        WHERE c."deletedAt" IS NULL
+          AND ${inWindows(Prisma.sql`c.date`, periodWindows)} AND c.date < ${dayEnd}
+        GROUP BY cat.name
+        ORDER BY amount DESC, cat.name ASC
+        LIMIT 5
+      `,
+      tx.$queryRaw<CropMoneyRow[]>`
+        SELECT cr.name AS crop,
+          SUM(ROUND(ri."receivedQuantity" * COALESCE(i."estimatedUnitPrice", 0), 2)) AS amount
+        FROM "Reception" r
+        JOIN "ReceptionItem" ri ON ri."receptionId" = r.id
+        JOIN "ShipmentItem" i ON i.id = ri."shipmentItemId" AND i."shipmentId" = r."shipmentId"
+        JOIN "Shipment" s ON s.id = r."shipmentId"
+        JOIN "Crop" cr ON cr.id = i."cropId"
+        WHERE r."deletedAt" IS NULL AND ri."deletedAt" IS NULL AND ri."parentItemId" IS NULL
+          AND i."deletedAt" IS NULL AND s."deletedAt" IS NULL AND s.status <> 'CANCELLED'
+          AND ${inWindows(Prisma.sql`r."receivedAt"`, periodReceiptWindows)} AND r."receivedAt" <= ${receiptCutoff}
+        GROUP BY cr.name
+      `,
+      tx.$queryRaw<CropMoneyRow[]>`
+        SELECT cr.name AS crop, SUM(v.total) AS amount
+        FROM "MarketSale" v
+        JOIN "ReceptionItem" ri ON ri.id = v."receptionItemId"
+        JOIN "Reception" r ON r.id = ri."receptionId"
+        JOIN "ShipmentItem" i ON i.id = ri."shipmentItemId" AND i."shipmentId" = r."shipmentId"
+        JOIN "Shipment" s ON s.id = r."shipmentId"
+        JOIN "Crop" cr ON cr.id = i."cropId"
+        WHERE v."cancelledAt" IS NULL AND r."deletedAt" IS NULL AND ri."deletedAt" IS NULL
+          AND i."deletedAt" IS NULL AND s."deletedAt" IS NULL AND s.status <> 'CANCELLED'
+          AND ${inWindows(Prisma.sql`v.date`, periodWindows)} AND v.date < ${dayEnd} AND r."receivedAt" <= ${receiptCutoff}
+        GROUP BY cr.name
+      `,
+      tx.$queryRaw<CropMoneyRow[]>`
+        SELECT cr.name AS crop,
+          SUM(
+            CASE
+              WHEN ca."amountUsd" IS NOT NULL THEN ca."amountUsd"
+              WHEN ca.percent IS NOT NULL THEN ROUND(c."amountUsd" * ca.percent / 100.0, 2)
+              ELSE 0
+            END
+          ) AS amount
+        FROM "CostAllocation" ca
+        JOIN "Cost" c ON c.id = ca."costId"
+        JOIN "Crop" cr ON cr.id = ca."cropId"
+        WHERE ca."deletedAt" IS NULL AND c."deletedAt" IS NULL AND ca."cropId" IS NOT NULL
+          AND ${inWindows(Prisma.sql`c.date`, periodWindows)} AND c.date < ${dayEnd}
+        GROUP BY cr.name
+      `,
+    ])
+
+  const costByMonth = new Map(costMonths.map((row) => [row.month, row.amount.toNumber()]))
+  const deliveredByMonth = new Map(deliveredMonths.map((row) => [row.month, row.amount.toNumber()]))
+  const saleByMonth = new Map(saleMonths.map((row) => [row.month, row.amount.toNumber()]))
+
+  const sumRange = (map: Map<string, number>, range: MonthRange) => {
+    let total = 0
+    for (const [month, amount] of map) {
+      if (month >= range.from && month <= range.to) total += amount
+    }
+    return Math.round(total * 100) / 100
+  }
+
+  const cropMap = new Map<
+    string,
+    { crop: string; deliveredUsd: number; salesUsd: number; directCostsUsd: number }
+  >()
+  for (const row of cropDelivered) {
+    cropMap.set(row.crop, {
+      crop: row.crop,
+      deliveredUsd: row.amount.toNumber(),
+      salesUsd: 0,
+      directCostsUsd: 0,
+    })
+  }
+  for (const row of cropSales) {
+    const existing = cropMap.get(row.crop) ?? {
+      crop: row.crop,
+      deliveredUsd: 0,
+      salesUsd: 0,
+      directCostsUsd: 0,
+    }
+    existing.salesUsd = row.amount.toNumber()
+    cropMap.set(row.crop, existing)
+  }
+  for (const row of cropDirectCosts) {
+    const existing = cropMap.get(row.crop) ?? {
+      crop: row.crop,
+      deliveredUsd: 0,
+      salesUsd: 0,
+      directCostsUsd: 0,
+    }
+    existing.directCostsUsd = row.amount.toNumber()
+    cropMap.set(row.crop, existing)
+  }
+
+  return {
+    costsUsd: sumRange(costByMonth, period),
+    previousCostsUsd: sumRange(costByMonth, previous),
+    deliveredUsd: sumRange(deliveredByMonth, period),
+    previousDeliveredUsd: sumRange(deliveredByMonth, previous),
+    salesUsd: sumRange(saleByMonth, period),
+    previousSalesUsd: sumRange(saleByMonth, previous),
+    topCategories: topCategories.map((row) => ({ name: row.name, amountUsd: row.amount.toNumber() })),
+    byCrop: [...cropMap.values()].sort((a, b) => a.crop.localeCompare(b.crop, 'es-EC')),
+    monthly: monthsBetween(period.from, period.to).map((month) => ({
+      month,
+      costsUsd: costByMonth.get(month) ?? 0,
+      deliveredUsd: deliveredByMonth.get(month) ?? 0,
+      salesUsd: saleByMonth.get(month) ?? 0,
+    })),
+  }
+}
+
 function addMovement(
   point: MonthlyPoint,
   row: Movement,
@@ -223,7 +389,11 @@ export async function productionAnalytics(request: Request, publicView: boolean,
   const span = monthDistance(period.from, period.to) + 1
   const previous = { from: shiftMonth(period.from, -span), to: shiftMonth(period.from, -1) }
   const yearAgo = { from: shiftMonth(period.from, -12), to: shiftMonth(period.to, -12) }
-  const activity = rangesTogether([period, previous, yearAgo])
+  const sixMonthStart = shiftMonth(period.to, -5)
+  const chartContext = { from: sixMonthStart < '2000-01' ? '2000-01' : sixMonthStart, to: period.to }
+  const activity = rangesTogether(
+    publicView ? [period, previous, yearAgo] : [period, previous, yearAgo, chartContext],
+  )
   const historical = { from: shiftMonth(lastClosed, -(historyMonths - 1)), to: lastClosed }
 
   const closedDateCutoff = new Date(currentMonth + '-01T00:00:00Z')
@@ -231,9 +401,10 @@ export async function productionAnalytics(request: Request, publicView: boolean,
   const lossCutoff = publicView ? closedDateCutoff : dayEnd
   const receiptCutoff = publicView ? closedReceiptCutoff : now
 
-  const [movements, reasons] = await prisma.$transaction(async (tx) => [
+  const [movements, reasons, financials] = await prisma.$transaction(async (tx) => [
     await loadMovements(tx, activity, [historical], publicView ? closedDateCutoff : dayEnd, lossCutoff, receiptCutoff),
     publicView ? [] : await loadReasons(tx, period, dayEnd),
+    publicView ? undefined : await loadFinancials(tx, period, previous, dayEnd, receiptCutoff),
   ], { isolationLevel: 'RepeatableRead', timeout: publicView ? 10_000 : 20_000 })
 
   const key = (crop: string, unit: string) => JSON.stringify([crop, unit])
@@ -278,5 +449,5 @@ export async function productionAnalytics(request: Request, publicView: boolean,
       forecast: buildForecast(observations, lastClosed),
     }
   })
-  return { period, previous, yearAgo, currentMonth, latestMonth, series, publicView }
+  return { period, previous, yearAgo, currentMonth, latestMonth, series, publicView, ...(financials ? { financials } : {}) }
 }

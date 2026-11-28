@@ -62,11 +62,29 @@ export async function getAdminOverview() {
       _count: { _all: true },
     }),
     prisma.marketSale.aggregate({
-      where: { cancelledAt: null, date: { gte: thirtyDaysAgo } },
+      where: {
+        cancelledAt: null,
+        date: { gte: thirtyDaysAgo },
+        receptionItem: {
+          deletedAt: null,
+          reception: { deletedAt: null, shipment: { deletedAt: null, status: { not: 'CANCELLED' } } },
+          shipmentItem: { deletedAt: null },
+        },
+      },
       _sum: { total: true },
       _count: true,
     }),
-    prisma.marketSale.count({ where: { cancelledAt: { not: null }, date: { gte: thirtyDaysAgo } } }),
+    prisma.marketSale.count({
+      where: {
+        cancelledAt: { not: null },
+        date: { gte: thirtyDaysAgo },
+        receptionItem: {
+          deletedAt: null,
+          reception: { deletedAt: null, shipment: { deletedAt: null, status: { not: 'CANCELLED' } } },
+          shipmentItem: { deletedAt: null },
+        },
+      },
+    }),
     prisma.trashEntry.count({ where: { restoredAt: null, purgeAt: { gt: now } } }),
     prisma.profileSession.count({ where: { revokedAt: null, expiresAt: { gt: now } } }),
     prisma.profileLoginAttempt.count({ where: { windowStart: { gt: lockoutCutoff }, attempts: { gte: 10 } } }),

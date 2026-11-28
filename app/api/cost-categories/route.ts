@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { prisma, runSerializable } from '@/lib/prisma'
 import { ProductionError, productionError, readBody, requireProfile } from '@/lib/production-api'
-import { cleanName, normalizeName } from '@/lib/production-validation'
+import { cleanName, normalizeCatalogName } from '@/lib/production-validation'
 import { retireIfExpired } from '@/lib/trash'
 
 export async function GET(request: Request) {
@@ -27,17 +27,21 @@ async function save(request: Request, update: boolean) {
     if (!name || name.length > 120 || (update && (typeof id !== 'string' || !id))) {
       throw new ProductionError('Ingresa un nombre de categoría de hasta 120 caracteres.')
     }
-    const normalizedName = normalizeName(name)
+    const normalizedName = normalizeCatalogName(name)
     const category = await runSerializable(async (tx) => {
-      let existing = await tx.costCategory.findUnique({ where: { normalizedName } })
+      const allCategories = await tx.costCategory.findMany()
+      let existing =
+        allCategories.find((item) => item.normalizedName === normalizedName) ??
+        allCategories.find((item) => normalizeCatalogName(item.name) === normalizedName) ??
+        null
       if (existing?.deletedAt) {
         if (await retireIfExpired(tx, 'costCategory', existing)) existing = null
         else throw new ProductionError('La categoría está en la papelera.', 409)
       }
       if (!update) {
-        const saved = await tx.costCategory.upsert({
-          where: { normalizedName }, create: { name, normalizedName }, update: { active: true },
-        })
+        const saved = existing
+          ? await tx.costCategory.update({ where: { id: existing.id }, data: { active: true } })
+          : await tx.costCategory.create({ data: { name, normalizedName } })
         await tx.auditLog.create({
           data: { entity: 'CostCategory', entityId: saved.id, action: 'CREATE', actor, afterJson: { name: saved.name } },
         })

@@ -56,7 +56,7 @@ export function MarketSummary() {
               <h2 className="text-lg font-bold leading-tight">Recibir cosecha</h2>
               {pendingCount > 0 && (
                 <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-bold text-amber-900 dark:bg-amber-900/50 dark:text-amber-200">
-                  {pendingCount} pendiente(s)
+                  {pendingCount}{pendingReceptions?.hasNext ? '+' : ''} pendiente(s)
                 </span>
               )}
             </div>

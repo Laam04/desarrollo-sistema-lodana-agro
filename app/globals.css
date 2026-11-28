@@ -232,3 +232,86 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* ==========================================================================
+   6. ANIMACIONES DE IDENTIDAD Y CARGA (FACIVITEC / LODANA AGRO)
+   ========================================================================== */
+@keyframes brand-shimmer {
+  0% {
+    transform: translateX(-130%) skewX(-18deg);
+  }
+  100% {
+    transform: translateX(230%) skewX(-18deg);
+  }
+}
+
+@keyframes brand-breathe {
+  0%,
+  100% {
+    transform: scale(0.985);
+    opacity: 0.92;
+  }
+  50% {
+    transform: scale(1.025);
+    opacity: 1;
+  }
+}
+
+@keyframes brand-progress {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(280%);
+  }
+}
+
+@keyframes brand-ring-cw {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes brand-ring-ccw {
+  from {
+    transform: rotate(360deg);
+  }
+  to {
+    transform: rotate(0deg);
+  }
+}
+
+.animate-brand-shimmer {
+  animation: brand-shimmer 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.animate-brand-breathe {
+  animation: brand-breathe 2.6s ease-in-out infinite;
+}
+
+.animate-brand-progress {
+  animation: brand-progress 1.6s ease-in-out infinite;
+}
+
+.animate-brand-ring-cw {
+  animation: brand-ring-cw 2.1s linear infinite;
+  transform-origin: center;
+}
+
+.animate-brand-ring-ccw {
+  animation: brand-ring-ccw 2.9s linear infinite;
+  transform-origin: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-brand-shimmer,
+  .animate-brand-breathe,
+  .animate-brand-progress,
+  .animate-brand-ring-cw,
+  .animate-brand-ring-ccw {
+    animation: none;
+  }
+}

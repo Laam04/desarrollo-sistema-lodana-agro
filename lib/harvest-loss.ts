@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client'
 import { ProductionError } from '@/lib/production-api'
 import { activeHarvest, committedStock } from '@/lib/production-stock'
-import { cleanName, normalizeName, parseDate, parsePositiveDecimal } from '@/lib/production-validation'
+import { cleanName, normalizeCatalogName, parseDate, parsePositiveDecimal } from '@/lib/production-validation'
 import { cleanReceiptImageName, defaultReceiptFileName, parseReceiptImageDataUrl } from '@/lib/receipt-image'
 import { retireIfExpired } from '@/lib/trash'
 
@@ -90,16 +90,19 @@ export async function saveLoss(
     }
   }
 
-  const normalizedName = normalizeName(draft.reason)
-  const existingReason = await tx.lossReason.findUnique({ where: { normalizedName } })
-  if (existingReason?.deletedAt && !(await retireIfExpired(tx, 'lossReason', existingReason))) {
-    throw new ProductionError('El motivo de merma está en la papelera.', 409)
+  const normalizedName = normalizeCatalogName(draft.reason)
+  const allReasons = await tx.lossReason.findMany()
+  let existingReason =
+    allReasons.find((item) => item.normalizedName === normalizedName) ??
+    allReasons.find((item) => normalizeCatalogName(item.name) === normalizedName) ??
+    null
+  if (existingReason?.deletedAt) {
+    if (await retireIfExpired(tx, 'lossReason', existingReason)) existingReason = null
+    else throw new ProductionError('El motivo de merma está en la papelera.', 409)
   }
-  const reason = await tx.lossReason.upsert({
-    where: { normalizedName },
-    update: { active: true },
-    create: { name: draft.reason, normalizedName },
-  })
+  const reason = existingReason
+    ? await tx.lossReason.update({ where: { id: existingReason.id }, data: { active: true } })
+    : await tx.lossReason.create({ data: { name: draft.reason, normalizedName } })
 
   const { date, quantity, affectsHarvest, notes, evidenceImagePatch } = draft
   const data = {

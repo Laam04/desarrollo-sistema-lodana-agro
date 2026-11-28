@@ -3,6 +3,7 @@ import { NextResponse } from 'next/server'
 import { prisma, runSerializable } from '@/lib/prisma'
 import { ProductionError, productionError, readBody, requireProfile } from '@/lib/production-api'
 import { cleanName, normalizeCatalogName, parsePositiveDecimal } from '@/lib/production-validation'
+import { retireIfExpired } from '@/lib/trash'
 
 export async function POST(request: Request) {
   try {
@@ -44,20 +45,32 @@ export async function POST(request: Request) {
       }
 
       let targetUnit = targetUnitId
-        ? await tx.unit.findFirst({ where: { id: targetUnitId, deletedAt: null }, select: { id: true, name: true } })
+        ? await tx.unit.findFirst({ where: { id: targetUnitId, active: true, deletedAt: null }, select: { id: true, name: true } })
         : null
-      if (!targetUnit && targetUnitName) {
-        const allUnits = await tx.unit.findMany({ where: { deletedAt: null }, select: { id: true, name: true } })
-        targetUnit = allUnits.find((u) => normalizeCatalogName(u.name) === normalizeCatalogName(targetUnitName)) ?? null
-        if (!targetUnit) {
-          targetUnit = await tx.unit.create({
-            data: { name: targetUnitName.toLowerCase().slice(0, 40), active: true },
-            select: { id: true, name: true },
+      if (!targetUnit && !targetUnitId && targetUnitName) {
+        const allUnits = await tx.unit.findMany({ select: { id: true, name: true, active: true, deletedAt: true } })
+        let matched = allUnits.find((u) => normalizeCatalogName(u.name) === normalizeCatalogName(targetUnitName)) ?? null
+        if (matched?.deletedAt) {
+          if (await retireIfExpired(tx, 'unit', matched)) matched = null
+          else throw new ProductionError('Esta unidad está en la papelera.', 409)
+        }
+        if (matched && !matched.active) {
+          matched = await tx.unit.update({
+            where: { id: matched.id },
+            data: { active: true },
+            select: { id: true, name: true, active: true, deletedAt: true },
           })
         }
+        if (!matched) {
+          matched = await tx.unit.create({
+            data: { name: targetUnitName.toLowerCase().slice(0, 40), active: true },
+            select: { id: true, name: true, active: true, deletedAt: true },
+          })
+        }
+        targetUnit = matched
       }
       if (!targetUnit) {
-        throw new ProductionError('Selecciona o escribe una unidad destino válida.')
+        throw new ProductionError('Selecciona o escribe una unidad destino activa y válida.')
       }
 
       const currentUnitId = source.saleUnitId ?? source.shipmentItem.unitId
@@ -90,6 +103,9 @@ export async function POST(request: Request) {
         sourceUnitCost && sourceUnitCost.gt(0)
           ? sourceUnitCost.mul(available).div(targetQuantity).toDecimalPlaces(4)
           : null
+      if (newUnitCost?.gte('100000000')) {
+        throw new ProductionError('El costo unitario ajustado por la conversión supera el máximo permitido.')
+      }
 
       const conversionNote =
         notes || `Cambio de presentación: ${available.toFixed(2)} ${currentUnitName} → ${targetQuantity.toFixed(2)} ${targetUnit.name}`

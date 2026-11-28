@@ -16,6 +16,41 @@ export function monthsBetween(from: string, to: string) {
   return Array.from({ length: Math.max(0, monthDistance(from, to) + 1) }, (_, index) => shiftMonth(from, index))
 }
 
+const shortMonthLabel = new Intl.DateTimeFormat('es-EC', { month: 'short', year: '2-digit', timeZone: 'UTC' })
+const fullMonthLabel = new Intl.DateTimeFormat('es-EC', { month: 'long', year: 'numeric', timeZone: 'UTC' })
+const shortDayLabel = new Intl.DateTimeFormat('es-EC', { day: '2-digit', month: 'short', timeZone: 'UTC' })
+const fullDayLabel = new Intl.DateTimeFormat('es-EC', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'UTC' })
+
+export function isMonthBucket(label: string) {
+  return /^\d{4}-(0[1-9]|1[0-2])$/.test(label)
+}
+
+export function isDayBucket(label: string) {
+  if (!/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(label)) return false
+  const parsed = new Date(`${label}T00:00:00Z`)
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === label
+}
+
+export function formatChartAxisLabel(label: string) {
+  if (isMonthBucket(label)) {
+    return shortMonthLabel.format(new Date(`${label}-01T00:00:00Z`))
+  }
+  if (isDayBucket(label)) {
+    return shortDayLabel.format(new Date(`${label}T00:00:00Z`))
+  }
+  return label
+}
+
+export function formatChartDetailLabel(label: string) {
+  if (isMonthBucket(label)) {
+    return fullMonthLabel.format(new Date(`${label}-01T00:00:00Z`))
+  }
+  if (isDayBucket(label)) {
+    return fullDayLabel.format(new Date(`${label}T00:00:00Z`))
+  }
+  return label
+}
+
 export type MonthRange = { from: string; to: string }
 export type Metric = 'harvested' | 'useful' | 'harvestCount' | 'losses' | 'affectingLosses' |
   'statisticalLosses' | 'unclassifiedLosses' | 'deducted' | 'shipped' | 'received' | 'sold'
@@ -47,6 +82,18 @@ export type AnalyticsSeries = {
   seasonality: Seasonality
 }
 
+export type AnalyticsFinancials = {
+  costsUsd: number
+  previousCostsUsd: number
+  deliveredUsd: number
+  previousDeliveredUsd: number
+  salesUsd: number
+  previousSalesUsd: number
+  topCategories: { name: string; amountUsd: number }[]
+  byCrop: { crop: string; deliveredUsd: number; salesUsd: number; directCostsUsd: number }[]
+  monthly: { month: string; costsUsd: number; deliveredUsd: number; salesUsd: number }[]
+}
+
 export type AnalyticsReport = {
   period: MonthRange
   previous: MonthRange
@@ -55,6 +102,7 @@ export type AnalyticsReport = {
   currentMonth: string
   series: AnalyticsSeries[]
   publicView: boolean
+  financials?: AnalyticsFinancials
 }
 
 function median(values: number[]) {

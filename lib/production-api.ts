@@ -100,9 +100,11 @@ export async function requireProfile(allowed: readonly Profile[]): Promise<Profi
 }
 
 export function clientIpKey(request: Request): string {
-  const forwarded = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
+  const vercelIp = request.headers.get('x-vercel-forwarded-for')?.split(',')[0]?.trim()
+  const cfIp = request.headers.get('cf-connecting-ip')?.trim()
   const realIp = request.headers.get('x-real-ip')?.trim()
-  const raw = forwarded || realIp || 'local'
+  const forwarded = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
+  const raw = vercelIp || cfIp || realIp || forwarded || 'local'
   return createHash('sha256').update(raw).digest('hex').slice(0, 24)
 }
 

@@ -9,7 +9,7 @@ export default async function AdministracionPage() {
   const profile = await currentActor()
   if (profile !== 'admin') redirect('/')
   return (
-    <Suspense>
+    <Suspense fallback={null}>
       <AdminWorkspace />
     </Suspense>
   )

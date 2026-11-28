@@ -9,7 +9,7 @@ export default async function LodanaPage() {
   const profile = await currentActor()
   if (profile !== 'production' && profile !== 'admin') redirect('/')
   return (
-    <Suspense fallback={<div className="p-8 text-sm text-muted-foreground">Cargando módulo de producción…</div>}>
+    <Suspense fallback={null}>
       <ProductionWorkspace profile={profile} />
     </Suspense>
   )

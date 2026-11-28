@@ -17,6 +17,7 @@ import {
   Wheat,
 } from 'lucide-react'
 import { AgroWorkspace } from '@/components/agro-workspace'
+import { BrandLoader } from '@/components/brand-loader'
 import { AdminAccessPanel } from '@/components/admin-access'
 import { AdminAuditPanel } from '@/components/admin-audit'
 import { AdminOperationsPanel } from '@/components/admin-operations'
@@ -72,7 +73,13 @@ function AdminOverviewSection() {
 
   if (error) return <MarketError message={error.message} retry={() => mutate()} />
   if (isLoading || !data) {
-    return <div className={`${marketUi.panel} p-6 text-sm text-muted-foreground`}>Cargando indicadores administrativos…</div>
+    return (
+      <BrandLoader
+        variant="section"
+        message="Cargando indicadores administrativos…"
+        subtitle="Supervisión e integridad del sistema"
+      />
+    )
   }
 
   const { kpis } = data

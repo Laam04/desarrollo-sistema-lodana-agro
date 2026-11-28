@@ -16,6 +16,22 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'PIN inválido.' }, { status: 401, headers: noStore })
     }
 
+    const clientKey = clientIpKey(request)
+    const nowMs = Date.now()
+    const windowCutoff = new Date(nowMs - 15 * 60 * 1000)
+
+    const existingAttempt = await prisma.profileLoginAttempt.findUnique({
+      where: { profile_clientKey: { profile, clientKey } },
+      select: { attempts: true, windowStart: true },
+    })
+    if (existingAttempt && existingAttempt.windowStart > windowCutoff && existingAttempt.attempts >= maxAttempts) {
+      const retryAfter = Math.max(1, Math.ceil((existingAttempt.windowStart.getTime() + 15 * 60 * 1000 - nowMs) / 1000))
+      return NextResponse.json(
+        { error: 'Se alcanzó el límite de intentos para este perfil. Inténtalo en unos minutos.' },
+        { status: 429, headers: { ...noStore, 'Retry-After': String(retryAfter) } },
+      )
+    }
+
     const verification = await verifyProfileCredentials(profile, pin)
     if (verification.disabled) {
       return NextResponse.json(
@@ -30,7 +46,6 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'PIN inválido.' }, { status: 401, headers: noStore })
     }
 
-    const clientKey = clientIpKey(request)
     const matches = verification.ok
     const increment = matches ? 0 : 1
 
@@ -61,7 +76,9 @@ export async function POST(request: Request) {
     }
 
     await prisma.$transaction([
-      prisma.profileLoginAttempt.deleteMany({ where: { profile, clientKey } }),
+      prisma.profileLoginAttempt.deleteMany({
+        where: { OR: [{ profile, clientKey }, { windowStart: { lte: windowCutoff } }] },
+      }),
       prisma.profileSession.deleteMany({ where: { expiresAt: { lte: new Date() } } }),
       prisma.profileSession.create({
         data: { jti: session.jti, profile, expiresAt: session.expiresAt },

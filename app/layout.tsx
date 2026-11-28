@@ -1,6 +1,8 @@
 import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
+import { Suspense } from 'react'
 import './globals.css'
+import { RouteTransitionOverlay } from '@/components/route-transition-overlay'
 import { ThemeProvider } from '@/components/theme-provider'
 
 
@@ -10,19 +12,15 @@ export const metadata: Metadata = {
   icons: {
     icon: [
       {
-        url: '/icon-light-32x32.png',
+        url: '/brand/facivitec-icon-light.png',
         media: '(prefers-color-scheme: light)',
       },
       {
-        url: '/icon-dark-32x32.png',
+        url: '/brand/facivitec-icon-dark.png',
         media: '(prefers-color-scheme: dark)',
       },
-      {
-        url: '/icon.svg',
-        type: 'image/svg+xml',
-      },
     ],
-    apple: '/apple-icon.png',
+    apple: '/brand/facivitec-apple-icon.png',
   },
 }
 
@@ -47,6 +45,9 @@ export default function RootLayout({
           disableTransitionOnChange
         >
           {children}
+          <Suspense fallback={null}>
+            <RouteTransitionOverlay />
+          </Suspense>
         </ThemeProvider>
         {process.env.VERCEL && <Analytics />}
       </body>

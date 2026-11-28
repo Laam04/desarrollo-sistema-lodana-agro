@@ -16,6 +16,8 @@ import {
   Shield,
 } from 'lucide-react'
 import { AgroWorkspace } from '@/components/agro-workspace'
+import { BrandLoader } from '@/components/brand-loader'
+import { navigateWithTransition } from '@/components/route-transition-overlay'
 import { ReportPreview } from '@/components/report-preview'
 import { MarketError, MarketPagination, marketUi } from '@/components/market-ui'
 import { productionFetch } from '@/lib/production-client'
@@ -233,6 +235,10 @@ function ReportsGeneratorSection({ data, onRefresh }: { data: ReportsIndexRespon
             }),
           }
       const response = await fetch(url, init)
+      if (response.status === 401) {
+        navigateWithTransition('/', { replace: true, label: 'Tu sesión expiró…' })
+        return
+      }
       if (!response.ok) {
         const err = await response.json().catch(() => null)
         throw new Error(err?.error ?? 'No se pudo exportar el documento.')
@@ -410,6 +416,10 @@ function ReportsHistorySection({
     setFeedback('')
     try {
       const response = await fetch(`/api/reports/${id}/export?format=${format}`)
+      if (response.status === 401) {
+        navigateWithTransition('/', { replace: true, label: 'Tu sesión expiró…' })
+        return
+      }
       if (!response.ok) {
         const err = await response.json().catch(() => null)
         throw new Error(err?.error ?? 'No se pudo descargar el reporte.')
@@ -859,7 +869,13 @@ export function ReportsWorkspace() {
       renderSection={(active) => {
         if (error) return <MarketError message={error.message} retry={() => mutate()} />
         if (isLoading || !data) {
-          return <div className={`${marketUi.panel} p-6 text-sm text-muted-foreground`}>Cargando centro de reportes…</div>
+          return (
+            <BrandLoader
+              variant="section"
+              message="Cargando centro de reportes…"
+              subtitle="Historial, filtros y automatización"
+            />
+          )
         }
         if (active === 'historial') return <ReportsHistorySection actor={data.actor} onSelectSaved={() => mutate()} />
         if (active === 'automatizacion') return <ReportsAutomationSection data={data} onRefresh={() => mutate()} />

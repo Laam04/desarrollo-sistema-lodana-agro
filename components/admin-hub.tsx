@@ -2,7 +2,9 @@
 
 import { useState } from 'react'
 import Link from 'next/link'
-import { BarChart3, Leaf, LogOut, Store, Wheat } from 'lucide-react'
+import { BarChart3, LogOut, Store, Wheat } from 'lucide-react'
+import { FacivitecMark } from '@/components/brand-logo'
+import { triggerBrandTransition } from '@/components/route-transition-overlay'
 
 const modules = [
   {
@@ -30,6 +32,7 @@ export function AdminHub() {
 
   async function logout() {
     setLoggingOut(true)
+    triggerBrandTransition('Cerrando sesión…')
     try {
       await fetch('/api/profile-logout', { method: 'POST' })
     } finally {
@@ -42,9 +45,7 @@ export function AdminHub() {
       <header className="border-b border-border bg-card">
         <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-5 py-4 sm:px-8">
           <div className="flex items-center gap-3">
-            <div className="flex size-10 items-center justify-center rounded-xl bg-primary text-primary-foreground">
-              <Leaf className="size-5" aria-hidden="true" />
-            </div>
+            <FacivitecMark size="sm" glow />
             <div>
               <p className="font-semibold">Lodana Agro</p>
               <p className="text-xs text-muted-foreground">Panel de administración</p>

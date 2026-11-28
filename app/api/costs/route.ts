@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server'
 import { prisma, runSerializable } from '@/lib/prisma'
 import { isRecord, ProductionError, productionError, readBody, requireProfile } from '@/lib/production-api'
 import { historyQuery } from '@/lib/production-history'
-import { cleanName, normalizeName, parseDate, parseDecimal, parsePositiveDecimal } from '@/lib/production-validation'
+import { cleanName, normalizeCatalogName, parseDate, parseDecimal, parsePositiveDecimal } from '@/lib/production-validation'
 import { cleanReceiptImageName, defaultReceiptFileName, parseReceiptImageDataUrl } from '@/lib/receipt-image'
 import { moveToTrash, retireIfExpired } from '@/lib/trash'
 
@@ -157,20 +157,25 @@ async function save(request: Request, update: boolean) {
         }
       }
 
-      const normalizedName = normalizeName(categoryName)
+      const normalizedName = normalizeCatalogName(categoryName)
       let category = null
       if (categoryId) {
         category = await tx.costCategory.findFirst({
           where: { id: categoryId, deletedAt: null, ...(before?.categoryId === categoryId ? {} : { active: true }) },
         })
       } else {
-        const existingCat = await tx.costCategory.findUnique({ where: { normalizedName } })
-        if (existingCat?.deletedAt && !(await retireIfExpired(tx, 'costCategory', existingCat))) {
-          throw new ProductionError('La categoría está en la papelera.', 409)
+        const allCategories = await tx.costCategory.findMany()
+        let existingCat =
+          allCategories.find((item) => item.normalizedName === normalizedName) ??
+          allCategories.find((item) => normalizeCatalogName(item.name) === normalizedName) ??
+          null
+        if (existingCat?.deletedAt) {
+          if (await retireIfExpired(tx, 'costCategory', existingCat)) existingCat = null
+          else throw new ProductionError('La categoría está en la papelera.', 409)
         }
-        category = await tx.costCategory.upsert({
-          where: { normalizedName }, update: { active: true }, create: { name: categoryName, normalizedName },
-        })
+        category = existingCat
+          ? await tx.costCategory.update({ where: { id: existingCat.id }, data: { active: true } })
+          : await tx.costCategory.create({ data: { name: categoryName, normalizedName } })
       }
       if (!category || category.deletedAt) throw new ProductionError('Selecciona una categoría activa.', 409)
       const data = {

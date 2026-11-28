@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react'
 import {
   BarChart3,
   DollarSign,
+  FileBarChart2,
   Home,
   LayoutGrid,
   ShieldCheck,
@@ -20,8 +21,11 @@ import { AgroWorkspace } from '@/components/agro-workspace'
 import { AnalyticsDashboard } from '@/components/analytics-dashboard'
 import { CropsManager } from '@/components/crops-manager'
 import { ProductionEasyHome, ProductionEasySection, type EasySectionId } from '@/components/production-easy'
+import { ProductionEasySummary } from '@/components/production-easy-summary'
+import { ProductionFarmerReports } from '@/components/production-farmer-reports'
 import { ProductionRecords } from '@/components/production-records'
 import { ProductionTrash } from '@/components/production-trash'
+import { triggerBrandTransition } from '@/components/route-transition-overlay'
 import type { Profile } from '@/lib/profile-session'
 
 type ViewMode = 'easy' | 'full'
@@ -65,6 +69,13 @@ const easySections = [
     description: 'Registra compras de insumos, jornales o gastos de la finca.',
   },
   {
+    id: 'reportes',
+    label: 'Reportes e impacto',
+    icon: FileBarChart2,
+    title: 'Reportes e impacto',
+    description: 'Reportes automáticos de productividad, ventas a Agro Market e impacto económico.',
+  },
+  {
     id: 'resumen',
     label: 'Cómo va la finca',
     icon: BarChart3,
@@ -88,6 +99,13 @@ const easySections = [
 ] as const
 
 const fullSections = [
+  {
+    id: 'reportes',
+    label: 'Reportes e impacto',
+    icon: FileBarChart2,
+    title: 'Reportes automáticos e impacto',
+    description: 'Reportes semanales y mensuales de productividad, entregas a Agro Market e impacto económico.',
+  },
   {
     id: 'resumen',
     label: 'Resumen',
@@ -213,6 +231,10 @@ export function ProductionWorkspace({ profile = 'production' }: { profile?: Prof
   }, [])
 
   function updateMode(next: ViewMode) {
+    if (next === mode) return
+    triggerBrandTransition(next === 'easy' ? 'Cambiando a Modo Fácil…' : 'Cambiando a Modo Completo…', {
+      autoHide: true,
+    })
     setMode(next)
     try {
       window.localStorage.setItem(STORAGE_KEY, next)
@@ -226,11 +248,19 @@ export function ProductionWorkspace({ profile = 'production' }: { profile?: Prof
     sections.find((item) => item.id === params.get('seccion'))?.id ?? sections[0].id
   const preselectedHarvestId = params.get('cosecha')
 
-  const hideHero = mode === 'easy' && (currentId === 'inicio' || isEasyDailySection(currentId))
+  const hideHero =
+    mode === 'easy' &&
+    (currentId === 'inicio' ||
+      currentId === 'resumen' ||
+      currentId === 'reportes' ||
+      isEasyDailySection(currentId))
 
   function renderSection(active: string) {
+    if (active === 'reportes') return <ProductionFarmerReports />
+
     if (mode === 'easy') {
       if (active === 'inicio') return <ProductionEasyHome />
+      if (active === 'resumen') return <ProductionEasySummary />
       if (isEasyDailySection(active)) {
         return (
           <ProductionEasySection

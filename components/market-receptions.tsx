@@ -251,7 +251,8 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
         })
       }
     }
-    if (!items.length) {
+    const closingPartialOnly = !items.length && shipment.status === 'PARTIALLY_RECEIVED' && hasDifference && closeWithDifferences
+    if (!items.length && !closingPartialOnly) {
       setError('Indica una cantidad recibida mayor que cero en al menos un producto.')
       return
     }
@@ -344,12 +345,16 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
             <tbody>
               {shipment.items.map((item) => {
                 const draft = line(item.id)
+                const parsedQty = Number(decimalInput(draft.quantity))
+                const parsedSaleQty = Number(decimalInput(draft.saleQuantity))
                 const proportionalCost =
                   draft.convertUnit &&
                   item.estimatedUnitPrice &&
-                  Number(draft.quantity) > 0 &&
-                  Number(draft.saleQuantity) > 0
-                    ? (Number(item.estimatedUnitPrice) * Number(draft.quantity)) / Number(draft.saleQuantity)
+                  Number.isFinite(parsedQty) &&
+                  parsedQty > 0 &&
+                  Number.isFinite(parsedSaleQty) &&
+                  parsedSaleQty > 0
+                    ? (Number(item.estimatedUnitPrice) * parsedQty) / parsedSaleQty
                     : null
                 const retailSuggestion = suggestRetailSalePrice(
                   proportionalCost !== null ? proportionalCost.toFixed(2) : item.estimatedUnitPrice,
@@ -469,7 +474,13 @@ function ReceiptDetail({ shipment, historical, onReceived, onRefresh }: {
       </form>
       {review && (
         <MarketDialog title={`Confirmar recepción de ${shipment.code}`} action="Confirmar recepción" busy={busy} onConfirm={() => void confirm()} onCancel={() => setReview(null)}>
-          <p className="text-muted-foreground">{review.closesWithDifferences ? 'Se registrará lo recibido y el faltante quedará como diferencia del envío.' : 'Se generará un recibo por las cantidades ingresadas.'}</p>
+          <p className="text-muted-foreground">
+            {review.closesWithDifferences
+              ? review.items.length === 0
+                ? 'Se cerrará el envío dejando el saldo pendiente registrado como diferencia para Producción.'
+                : 'Se registrará lo recibido y el faltante quedará como diferencia del envío.'
+              : 'Se generará un recibo por las cantidades ingresadas.'}
+          </p>
           <ul className="grid gap-1.5">
             {review.items.map((row) => {
               const item = shipment.items.find((product) => product.id === row.shipmentItemId)

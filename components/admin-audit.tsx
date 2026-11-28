@@ -89,7 +89,7 @@ export function AdminAuditPanel() {
           </button>
         </div>
 
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-7">
           <input
             type="search"
             value={q}
@@ -97,6 +97,14 @@ export function AdminAuditPanel() {
             placeholder="Buscar ID, entidad, acción…"
             className={`${marketUi.input} lg:col-span-2`}
           />
+          <select value={actor} onChange={(e) => { setActor(e.target.value); setPage(1) }} className={marketUi.input} aria-label="Filtrar por perfil">
+            <option value="">Todos los perfiles</option>
+            <option value="production">Producción agrícola</option>
+            <option value="reception">Agro Market</option>
+            <option value="queries">Consultas y reportes</option>
+            <option value="admin">Administración</option>
+            <option value="system-cron">Automatización (cron)</option>
+          </select>
           <select value={entity} onChange={(e) => { setEntity(e.target.value); setPage(1) }} className={marketUi.input}>
             <option value="">Todas las entidades</option>
             {(data?.entities ?? []).map((ent) => (

@@ -7,6 +7,7 @@ import { productionFetch } from '@/lib/production-client'
 import { forecastMinimum, monthDistance, monthsBetween, shiftMonth, type AnalyticsReport, type AnalyticsSeries, type Metric, type MonthRange } from '@/lib/analytics-model'
 import { AnalyticsChart, analyticsNumber, formatMonth } from '@/components/analytics-chart'
 import { AnalysisNote } from '@/components/analysis-note'
+import { BrandLoader } from '@/components/brand-loader'
 
 const panel = 'min-w-0 rounded-2xl border border-[#dbe7dd] bg-white p-4 shadow-sm dark:border-[#2d3b32] dark:bg-[#18211c] sm:p-5'
 const field = 'min-w-0 w-full rounded-xl border border-border bg-background px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-emerald-600'
@@ -326,7 +327,14 @@ export function AnalyticsDashboard({ publicView = false }: { publicView?: boolea
           <span>{error.message}</span><button type="button" className="font-semibold underline" onClick={() => void mutate()}>Reintentar</button>
         </div>
       )}
-      {(isLoading || isValidating) && <p role="status" className="text-sm text-muted-foreground">{data ? 'Actualizando estadísticas…' : 'Cargando estadísticas…'}</p>}
+      {isLoading && !data && (
+        <BrandLoader
+          variant="section"
+          message="Cargando estadísticas…"
+          subtitle="Procesando series de producción y comercialización"
+        />
+      )}
+      {isValidating && data && <p role="status" className="text-sm text-muted-foreground">Actualizando estadísticas…</p>}
       {data && (
         <>
           {!publicView && (
@@ -503,7 +511,7 @@ function AnalysisSections({ report, series, filtered, chooseChart, yearCompariso
               { label: 'Recibida', value: received }, { label: 'Vendida', value: sold },
               { label: 'Recibida menos vendida', value: received !== null && sold !== null && comparableFlows('received', 'sold') ? received - sold : null },
             ]} />
-            <p className="text-xs leading-5 text-muted-foreground">Las ventas pueden proceder de recepciones de otros meses. La diferencia resume los movimientos del período.</p>
+            <p className="text-xs leading-5 text-muted-foreground">Las ventas pueden proceder de recepciones de otros meses o de productos cuya presentación se convirtió a otra unidad al vender. La diferencia resume los movimientos registrados en la unidad seleccionada.</p>
             <h4 className="text-sm font-semibold">Productos con mayor volumen vendido</h4>
             <Ranking items={ranking(filtered, 'sold', report.period).slice(0, 8)} unit={series.unit} />
           </div>

@@ -3,6 +3,8 @@
 import Link from 'next/link'
 import { useEffect, useRef, useState } from 'react'
 import { Leaf, PackageCheck, Search, Settings, ArrowRight, X, ShieldCheck } from 'lucide-react'
+import { FacivitecHorizontal, FacivitecMark } from '@/components/brand-logo'
+import { navigateWithTransition } from '@/components/route-transition-overlay'
 import { productionFetch } from '@/lib/production-client'
 
 type Profile = 'production' | 'reception' | 'queries' | 'admin'
@@ -53,15 +55,24 @@ export function ProfileSelector() {
     setError('')
     try {
       await productionFetch('/api/profile-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile: selected, pin: value }) })
-      window.location.assign(
+      const targetUrl =
         selected === 'admin'
           ? '/administracion'
           : selected === 'production'
             ? '/lodana'
             : selected === 'queries'
               ? '/reportes'
-              : '/agro-market',
-      )
+              : '/agro-market'
+      const transitionLabel =
+        selected === 'admin'
+          ? 'Ingresando a Administración…'
+          : selected === 'production'
+            ? 'Ingresando a Producción agrícola…'
+            : selected === 'queries'
+              ? 'Ingresando a Reportes…'
+              : 'Ingresando a Agro Market…'
+      setSelected(null)
+      navigateWithTransition(targetUrl, { label: transitionLabel })
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : 'No se pudo iniciar sesión.')
       setPin('')
@@ -74,14 +85,31 @@ export function ProfileSelector() {
   return (
     <main className="min-h-screen bg-[#f6f8f4] px-5 py-8 text-[#20352b] dark:bg-[#101713] dark:text-[#edf4ee] sm:px-8 sm:py-12">
       <div className="mx-auto flex min-h-[calc(100vh-6rem)] max-w-6xl flex-col">
-        <header className="flex items-center justify-between">
-          <div className="flex items-center gap-3"><div className="flex size-11 items-center justify-center rounded-2xl bg-[#2c6048] text-white shadow-sm"><Leaf /></div><div><p className="text-xl font-semibold tracking-tight">Lodana Agro</p><p className="text-xs text-muted-foreground">Gestión agrícola</p></div></div>
+        <header className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <FacivitecMark size="md" glow />
+            <div>
+              <p className="text-xl font-semibold tracking-tight">Lodana Agro</p>
+              <p className="text-xs text-muted-foreground">Gestión agrícola</p>
+            </div>
+          </div>
           <button type="button" aria-label="Administración" onClick={() => openPin('admin')} className="rounded-xl p-2.5 text-muted-foreground transition hover:bg-white hover:text-[#2c6048] dark:hover:bg-[#1b2920]"><Settings aria-hidden="true" /></button>
         </header>
-        <section className="flex flex-1 flex-col justify-center py-12"><div className="mx-auto max-w-2xl text-center"><p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#2c6048]">Bienvenido</p><h1 className="mt-3 text-3xl font-semibold tracking-[-0.04em] sm:text-5xl">Selecciona un espacio de trabajo</h1><p className="mx-auto mt-4 max-w-xl text-sm leading-6 text-muted-foreground sm:text-base">Elige el área a la que deseas ingresar para comenzar a trabajar con la información de tu operación agrícola.</p></div>
+        <section className="flex flex-1 flex-col justify-center py-10 sm:py-12">
+          <div className="mx-auto max-w-2xl text-center">
+            <div className="mx-auto mb-6 inline-flex items-center justify-center rounded-2xl border border-[#d7e5d9] bg-white/80 px-5 py-3 shadow-[0_8px_28px_rgba(35,78,52,0.06)] backdrop-blur-md dark:border-[#293b30] dark:bg-[#15201a]/85">
+              <FacivitecHorizontal className="h-9 w-auto sm:h-11" />
+            </div>
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#2c6048] dark:text-[#8fd1a6]">Bienvenido</p>
+            <h1 className="mt-2.5 text-3xl font-semibold tracking-[-0.04em] sm:text-5xl">Selecciona un espacio de trabajo</h1>
+            <p className="mx-auto mt-4 max-w-xl text-sm leading-6 text-muted-foreground sm:text-base">Elige el área a la que deseas ingresar para comenzar a trabajar con la información de tu operación agrícola.</p>
+          </div>
           <div className="mt-10 grid gap-4 md:grid-cols-3">{profiles.map(({ id, title, description, icon: Icon, color }) => <article key={id} className="group rounded-3xl border border-[#dfe8df] bg-white/90 p-6 shadow-[0_10px_30px_rgba(35,78,52,0.05)] transition hover:-translate-y-1 hover:border-[#b7d3bc] hover:shadow-[0_18px_40px_rgba(35,78,52,0.1)] dark:border-[#293b30] dark:bg-[#18221c]"><div className={`flex size-12 items-center justify-center rounded-2xl ${color === 'green' ? 'bg-[#e2f0e5] text-[#2c6048]' : color === 'amber' ? 'bg-[#f7eddf] text-[#a66c27]' : 'bg-[#e5edf5] text-[#50749a]'}`}><Icon aria-hidden="true" /></div><h2 className="mt-6 text-lg font-semibold">{title}</h2><p className="mt-2 min-h-12 text-sm leading-6 text-muted-foreground">{description}</p>{id === 'queries' ? <div className="mt-6 flex flex-wrap gap-2"><Link href="/consultas" className="inline-flex items-center gap-2 rounded-xl bg-[#2c6048] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[#234d39]">Ver estadísticas <ArrowRight className="size-4" aria-hidden="true" /></Link><button type="button" onClick={() => openPin('queries')} className="inline-flex items-center gap-2 rounded-xl border border-[#cfdcd1] px-4 py-2.5 text-sm font-semibold text-foreground transition hover:bg-[#eef5ef] dark:border-[#34453a] dark:hover:bg-[#223027]">Reportes</button></div> : <button type="button" onClick={() => openPin(id)} className="mt-6 inline-flex items-center gap-2 rounded-xl bg-[#2c6048] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[#234d39]">Ingresar <ArrowRight className="size-4" aria-hidden="true" /></button>}</article>)}</div>
         </section>
-        <footer className="text-center text-xs text-muted-foreground">Lodana Agro · Acceso por perfiles</footer>
+        <footer className="flex flex-col items-center justify-center gap-1 text-center text-xs text-muted-foreground">
+          <p>Lodana Agro · Acceso por perfiles</p>
+          <p className="text-[11px] opacity-80">Facultad Ciencias de la Vida y Tecnologías · ULEAM</p>
+        </footer>
       </div>
       {selected && selectedProfile && (
         <dialog
@@ -117,7 +145,14 @@ export function ProfileSelector() {
               placeholder="••••"
             />
             {error && <p id="pin-error" role="alert" className="mt-2 text-center text-sm text-destructive">{error}</p>}
-            {loading && <p role="status" className="mt-3 text-center text-sm text-muted-foreground">Validando PIN…</p>}
+            {loading && (
+              <div role="status" className="mt-4 flex items-center justify-center gap-2.5 text-sm text-muted-foreground">
+                <span className="animate-brand-breathe inline-flex">
+                  <FacivitecMark size="xs" alt="" />
+                </span>
+                <span>Validando PIN…</span>
+              </div>
+            )}
           </form>
         </dialog>
       )}

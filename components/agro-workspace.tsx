@@ -5,19 +5,24 @@ import { useSearchParams } from 'next/navigation'
 import { useTheme } from 'next-themes'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import {
-  AlertTriangle,
+  ArrowLeft,
   ChevronRight,
+  Home,
   LogOut,
   Menu,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
   Repeat,
-  Sprout,
   Sun,
   X,
   type LucideIcon,
 } from 'lucide-react'
+import { FacivitecHorizontal, FacivitecMark } from '@/components/brand-logo'
+import {
+  hideBrandTransition,
+  triggerBrandTransition,
+} from '@/components/route-transition-overlay'
 import { productionFetch } from '@/lib/production-client'
 
 /* ───────────────────────── Datos ───────────────────────── */
@@ -41,6 +46,7 @@ const ui = {
 /* ───────────────────── Diálogo de confirmación ───────────────────── */
 
 type ConfirmState = {
+  kind: 'logout' | 'switch'
   title: string
   description: string
   confirmLabel: string
@@ -66,44 +72,74 @@ function ConfirmDialog({
     return () => dialog?.close()
   }, [])
 
+  const isSwitch = state.kind === 'switch'
+  const ActionIcon = isSwitch ? Repeat : LogOut
+
   return (
     <dialog
       ref={dialogRef}
       role="alertdialog"
       aria-labelledby="ws-confirm-title"
       aria-describedby="ws-confirm-desc"
-      className="m-auto w-[calc(100%-2rem)] max-w-md bg-transparent p-0 text-foreground backdrop:bg-black/50 backdrop:backdrop-blur-sm"
+      className="m-auto w-[calc(100%-2rem)] max-w-md bg-transparent p-0 text-foreground backdrop:bg-black/55 backdrop:backdrop-blur-sm"
       onCancel={(event) => { event.preventDefault(); if (!busy) onCancel() }}
       onClick={(event) => { if (event.target === event.currentTarget && !busy) onCancel() }}
     >
-      <div
-        className="w-full max-w-md rounded-2xl border border-[#dbe7dd] bg-white p-6 shadow-xl dark:border-[#2d3b32] dark:bg-[#18211c]"
-      >
-        <div className="flex items-start gap-4">
-          <div className="flex size-11 shrink-0 items-center justify-center rounded-full bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300">
-            <AlertTriangle className="size-5" />
-          </div>
-          <div>
-            <h4 id="ws-confirm-title" className="text-base font-semibold">
-              {state.title}
-            </h4>
-            <p
-              id="ws-confirm-desc"
-              className="mt-1 text-sm text-muted-foreground"
+      <div className="relative overflow-hidden rounded-3xl border border-[#d5e3d7] bg-white shadow-[0_24px_60px_rgba(16,32,24,0.22)] dark:border-[#2a3b31] dark:bg-[#141d18] dark:shadow-[0_24px_60px_rgba(0,0,0,0.55)]">
+        {/* Línea superior sutil de marca FACIVITEC (verde → índigo) */}
+        <div
+          aria-hidden
+          className="h-1 w-full bg-gradient-to-r from-[#079341] via-[#2c6048] to-[#2a2361] dark:from-[#1acc72] dark:via-[#2c6048] dark:to-[#8b95f6]"
+        />
+
+        <div className="p-6">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3.5">
+              <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl border border-[#cfe0d2] bg-[#eef6f0] text-[#1f5e42] dark:border-[#2d4537] dark:bg-[#1b2d23] dark:text-[#8fd1a6]">
+                <ActionIcon className="size-5" aria-hidden />
+              </div>
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#2c6048] dark:text-[#8fd1a6]">
+                  Lodana Agro
+                </p>
+                <h4 id="ws-confirm-title" className="mt-0.5 text-lg font-bold tracking-tight text-foreground">
+                  {state.title}
+                </h4>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              disabled={busy}
+              aria-label="Cerrar ventana"
+              onClick={onCancel}
+              className="rounded-xl p-2 text-muted-foreground transition hover:bg-[#eef5ef] hover:text-foreground disabled:opacity-50 dark:hover:bg-[#223027]"
             >
-              {state.description}
-            </p>
+              <X className="size-4.5" aria-hidden />
+            </button>
           </div>
+
+          <p
+            id="ws-confirm-desc"
+            className="mt-4 text-sm leading-6 text-muted-foreground"
+          >
+            {state.description}
+          </p>
+
+          {error && (
+            <p role="alert" className="mt-4 rounded-xl border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300">
+              {error}
+            </p>
+          )}
         </div>
 
-        {error && <p role="alert" className="mt-4 text-sm text-red-700 dark:text-red-300">{error}</p>}
-        <div className="mt-6 flex flex-wrap justify-end gap-2">
+        <div className="flex flex-col-reverse gap-2.5 border-t border-[#e3ece4] bg-[#f7fbf8] px-6 py-4 dark:border-[#243229] dark:bg-[#101713] sm:flex-row sm:justify-end">
           <button
             type="button"
             autoFocus
             disabled={busy}
             onClick={onCancel}
-            className="rounded-xl border border-[#cfdcd1] px-4 py-2 text-sm font-medium transition hover:bg-[#eef5ef] dark:border-[#34453a] dark:hover:bg-[#223027]"
+            className="inline-flex min-h-11 items-center justify-center rounded-xl border border-[#cfdcd1] bg-white px-4 py-2 text-sm font-semibold text-foreground transition hover:bg-[#eef5ef] disabled:opacity-60 dark:border-[#34453a] dark:bg-[#18211c] dark:hover:bg-[#223027]"
           >
             Cancelar
           </button>
@@ -111,9 +147,10 @@ function ConfirmDialog({
             type="button"
             disabled={busy}
             onClick={onConfirm}
-            className="rounded-xl bg-[#2c6048] px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-[#234d39] focus:outline-none focus:ring-2 focus:ring-[#b8d8bf] disabled:opacity-60"
+            className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-[#2c6048] px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-[#234d39] focus:outline-none focus:ring-2 focus:ring-[#b8d8bf] disabled:opacity-60"
           >
-            {busy ? 'Cerrando…' : state.confirmLabel}
+            <ActionIcon className="size-4" aria-hidden />
+            {busy ? (isSwitch ? 'Cambiando…' : 'Cerrando…') : state.confirmLabel}
           </button>
         </div>
       </div>
@@ -194,10 +231,11 @@ export function AgroWorkspace({
     }
   }, [mobileOpen])
 
-  function leave(config: { title: string; description: string; label: string }) {
+  function leave(config: { kind: 'logout' | 'switch'; title: string; description: string; label: string }) {
     setMobileOpen(false)
     setLeaveError('')
     setConfirm({
+      kind: config.kind,
       title: config.title,
       description: config.description,
       confirmLabel: config.label,
@@ -206,12 +244,21 @@ export function AgroWorkspace({
 
   async function confirmLeave() {
     if (leaving) return
+    const pendingConfirm = confirm
+    const transitionLabel =
+      pendingConfirm?.kind === 'switch'
+        ? 'Cambiando de perfil…'
+        : 'Cerrando sesión…'
     setLeaving(true)
     setLeaveError('')
+    setConfirm(null)
+    triggerBrandTransition(transitionLabel)
     try {
       await productionFetch('/api/profile-logout', { method: 'POST' })
       window.location.replace('/')
     } catch (error) {
+      hideBrandTransition()
+      setConfirm(pendingConfirm)
       setLeaveError(error instanceof Error ? error.message : 'No se pudo cerrar la sesión.')
       setLeaving(false)
     }
@@ -219,18 +266,18 @@ export function AgroWorkspace({
 
   function requestSwitchProfile() {
     leave({
+      kind: 'switch',
       title: 'Cambiar de perfil',
-      description:
-        'Volverás a la selección de perfil.',
+      description: 'Saldrás de este espacio de trabajo para elegir otro perfil en la portada.',
       label: 'Cambiar de perfil',
     })
   }
 
   function requestLogout() {
     leave({
+      kind: 'logout',
       title: 'Cerrar sesión',
-      description:
-        'Se cerrará tu sesión en este espacio de trabajo. Los datos ya registrados se conservan.',
+      description: 'Se cerrará tu sesión actual en este espacio de trabajo y volverás al inicio.',
       label: 'Cerrar sesión',
     })
   }
@@ -254,9 +301,7 @@ export function AgroWorkspace({
             onClick={() => setMobileOpen(false)}
             className="flex items-center gap-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#b8d8bf]"
           >
-            <div className="flex size-11 items-center justify-center rounded-2xl bg-gradient-to-br from-[#3b7a5c] to-[#24523b] text-white shadow-md shadow-[#2c6048]/30">
-              <Sprout className="size-6" />
-            </div>
+            <FacivitecMark size="md" glow />
             <div>
               <p className="font-semibold leading-tight">Lodana Agro</p>
               <p className="text-[11px] text-muted-foreground">
@@ -346,6 +391,11 @@ export function AgroWorkspace({
           })}
         </nav>
 
+        <div className="mt-auto pt-6">
+          <div className="flex flex-col items-center gap-1.5 rounded-2xl border border-[#e3ece4] bg-[#f7fbf7]/80 px-3 py-3 dark:border-[#243229] dark:bg-[#111915]">
+            <FacivitecHorizontal className="h-7 w-auto opacity-95" />
+          </div>
+        </div>
       </aside>
 
       {mobileOpen && (
@@ -398,6 +448,28 @@ export function AgroWorkspace({
                 </>
               )}
             </button>
+
+            {active !== sections[0].id && (
+              <Link
+                href={path}
+                prefetch={false}
+                aria-label={sections[0].id === 'inicio' ? 'Volver al inicio' : `Volver a ${sections[0].label}`}
+                className="inline-flex min-h-10 shrink-0 items-center gap-1.5 rounded-xl border-2 border-[#2c6048] bg-[#e4f0e7] px-3 py-1.5 text-sm font-bold text-[#1f4834] shadow-sm transition hover:bg-[#2c6048] hover:text-white focus:outline-none focus:ring-2 focus:ring-[#b8d8bf] dark:border-[#3d7a5b] dark:bg-[#1f3b2c] dark:text-[#d5f0dc] dark:hover:bg-[#2c6048] dark:hover:text-white"
+              >
+                {sections[0].id === 'inicio' ? (
+                  <>
+                    <Home className="size-4 shrink-0" aria-hidden />
+                    <span className="hidden sm:inline">Volver al inicio</span>
+                    <span className="sm:hidden">Inicio</span>
+                  </>
+                ) : (
+                  <>
+                    <ArrowLeft className="size-4 shrink-0" aria-hidden />
+                    <span className="hidden sm:inline">{sections[0].label}</span>
+                  </>
+                )}
+              </Link>
+            )}
 
             <div className="min-w-0">
               <nav

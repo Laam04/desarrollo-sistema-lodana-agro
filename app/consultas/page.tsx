@@ -1,6 +1,7 @@
 import Link from 'next/link'
-import { ArrowLeft, BarChart3, Sprout } from 'lucide-react'
+import { ArrowLeft, BarChart3 } from 'lucide-react'
 import { AnalyticsDashboard } from '@/components/analytics-dashboard'
+import { FacivitecHorizontal, FacivitecMark } from '@/components/brand-logo'
 
 export const metadata = {
   title: 'Consultas públicas | Lodana Agro',
@@ -13,12 +14,17 @@ export default function ConsultasPage() {
       <header className="border-b border-[#dbe5db] bg-white dark:border-[#29362f] dark:bg-[#141c18]">
         <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-8 lg:px-10">
           <div className="flex items-center gap-3">
-            <span className="grid size-10 place-items-center rounded-xl bg-[#2c6048] text-white"><Sprout className="size-5" aria-hidden /></span>
+            <FacivitecMark size="sm" glow />
             <div><p className="font-semibold">Lodana Agro</p><p className="text-xs text-muted-foreground">Datos para investigación</p></div>
           </div>
-          <Link href="/" className="inline-flex items-center gap-2 rounded-xl border border-border px-3 py-2 text-sm font-semibold hover:bg-muted focus-visible:outline-2 focus-visible:outline-emerald-600">
-            <ArrowLeft className="size-4" aria-hidden /> Inicio
-          </Link>
+          <div className="flex items-center gap-3">
+            <div className="hidden sm:block">
+              <FacivitecHorizontal className="h-7 w-auto" />
+            </div>
+            <Link href="/" className="inline-flex items-center gap-2 rounded-xl border border-border px-3 py-2 text-sm font-semibold hover:bg-muted focus-visible:outline-2 focus-visible:outline-emerald-600">
+              <ArrowLeft className="size-4" aria-hidden /> Inicio
+            </Link>
+          </div>
         </div>
       </header>
       <main className="mx-auto max-w-[1400px] px-4 py-6 sm:px-8 lg:px-10">

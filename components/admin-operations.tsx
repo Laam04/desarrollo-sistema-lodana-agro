@@ -4,7 +4,7 @@ import Link from 'next/link'
 import { useState } from 'react'
 import useSWR from 'swr'
 import { AlertTriangle, CheckCircle2, ExternalLink, ShieldAlert, Trash2, Truck, XCircle } from 'lucide-react'
-import { formatDate, productionFetch } from '@/lib/production-client'
+import { formatDate, formatTimestampDate, productionFetch } from '@/lib/production-client'
 import { receiptCode, units, usd } from '@/lib/market-data'
 import { MarketError, marketUi } from '@/components/market-ui'
 
@@ -303,8 +303,8 @@ export function AdminOperationsPanel() {
                       <td className="px-3 py-2 font-medium">{row.entityType}</td>
                       <td className="px-3 py-2 font-mono text-xs">{row.entityId}</td>
                       <td className="px-3 py-2 text-xs">{row.deletedBy ?? '—'}</td>
-                      <td className="px-3 py-2 text-xs text-muted-foreground">{formatDate(row.deletedAt)}</td>
-                      <td className="px-3 py-2 text-xs text-muted-foreground">{formatDate(row.purgeAt)}</td>
+                      <td className="px-3 py-2 text-xs text-muted-foreground">{formatTimestampDate(row.deletedAt)}</td>
+                      <td className="px-3 py-2 text-xs text-muted-foreground">{formatTimestampDate(row.purgeAt)}</td>
                     </tr>
                   ))}
                 </tbody>

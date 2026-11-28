@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useId, useRef, useState } from 'react'
+import { formatChartAxisLabel, formatChartDetailLabel, isDayBucket, isMonthBucket } from '@/lib/analytics-model'
 
 const palette = {
   green: '#16815d',
@@ -12,11 +13,9 @@ const palette = {
 
 export const analyticsNumber = new Intl.NumberFormat('es-EC', { maximumFractionDigits: 2 })
 const axisNumber = new Intl.NumberFormat('es-EC', { notation: 'compact', maximumFractionDigits: 1 })
-const shortMonth = new Intl.DateTimeFormat('es-EC', { month: 'short', year: '2-digit', timeZone: 'UTC' })
-const fullMonth = new Intl.DateTimeFormat('es-EC', { month: 'long', year: 'numeric', timeZone: 'UTC' })
 
 export function formatMonth(month: string) {
-  return fullMonth.format(new Date(month + '-01T00:00:00Z'))
+  return formatChartDetailLabel(month)
 }
 
 type Line = {
@@ -121,7 +120,7 @@ export function AnalyticsChart({ label, unit, months, lines, band }: {
             const show = isLast || (index % labelEvery === 0 && lastX - x(index) >= 48)
             return show ? (
               <text key={month} x={x(index)} y={bottom + 22} textAnchor={isLast ? 'end' : index === 0 ? 'start' : 'middle'} className="fill-muted-foreground" fontSize="10.5">
-                {shortMonth.format(new Date(month + '-01T00:00:00Z'))}
+                {formatChartAxisLabel(month)}
               </text>
             ) : null
           })}
@@ -160,7 +159,7 @@ export function AnalyticsChart({ label, unit, months, lines, band }: {
         <div className="mt-2 max-h-64 overflow-auto rounded-lg border border-border" tabIndex={0} role="region" aria-label={`Valores de ${label} en ${unit}`}>
           <table className="w-full text-sm">
             <thead className="sticky top-0 bg-muted">
-              <tr><th scope="col" className="p-2 text-left font-medium">Mes</th>
+              <tr><th scope="col" className="p-2 text-left font-medium">{months.every(isMonthBucket) ? 'Mes' : months.every(isDayBucket) ? 'Fecha' : 'Categoría'}</th>
                 {lines.map(({ label: colLabel }) => <th key={colLabel} scope="col" className="p-2 text-right font-medium">{colLabel}</th>)}
                 {!!bandPoints.length && <th scope="col" className="p-2 text-right font-medium">Rango</th>}
               </tr>
